@@ -15,6 +15,18 @@ Requirements: **bash**, **curl**. WP-CLI is used by `setup`/`teardown` if availa
 
 ---
 
+## Host instructions
+
+If you are hosting a test WordPress site for this work, here is what we need and how to do it.
+
+1. **Prepare the files** — Get `rtc-test.php` and `rtc-test.sh` from this repo (see the table above for where each file belongs).
+2. **Install the MU-plugin** — Copy `rtc-test.php` into `wp-content/mu-plugins/` on the site you are testing.
+3. **Run setup on the server** — From the directory where `rtc-test.sh` lives, run `bash rtc-test.sh setup` (ideally on the web host so WP-CLI can create the test user and post). Confirm the plugin is loaded under **Tools → RTC Tests** in wp-admin.
+4. **Run the measurement pass** — Run the baseline sequence (e.g. `baseline`, `single-idle`, `sustain`, then `report` as described under [Initial report](#initial-report)). Adjust variants if you are asked to stress-test.
+5. **Share the output** — Send back the command output, reports, and any notes on environment (PHP version, caching, approximate traffic).
+
+---
+
 ## Installation
 
 Copy `rtc-test.php` into the site's `mu-plugins` directory. No activation needed.
