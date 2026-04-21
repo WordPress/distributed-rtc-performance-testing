@@ -1,0 +1,1100 @@
+<?php
+/**
+ * Plugin Name: RTC Test
+ * Description: Load-test monitor and session capture for the WordPress RTC HTTP polling endpoint.
+ *              Monitor: records per-request timing, CPU, query, and concurrency metrics (tagged requests).
+ *              Capture: records real Gutenberg browser sessions as replay fixtures.
+ * Version: 1.0.0
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+// Capture CPU state as early as possible in the request lifecycle.
+// getrusage() returns cumulative user+system CPU for this FPM worker process;
+// we always use it as a delta (end - start) so the cumulative baseline does not
+// matter. Stored in a global so rtctest_post_dispatch can compute total request
+// CPU (WP bootstrap + auth + routing + dispatch) rather than dispatch-only.
+//
+// PHP-FPM re-executes wp-settings.php (and therefore this file) from scratch
+// on every request, so this captures the start of each individual request.
+$_rtctest_ru             = getrusage();
+$GLOBALS['rtctest_boot_cpu'] = (int) $_rtctest_ru['ru_utime.tv_sec'] * 1000000 + (int) $_rtctest_ru['ru_utime.tv_usec']
+                             + (int) $_rtctest_ru['ru_stime.tv_sec'] * 1000000 + (int) $_rtctest_ru['ru_stime.tv_usec'];
+unset( $_rtctest_ru );
+
+// =============================================================================
+// MONITOR -- records metrics for requests tagged X-RTC-Test: 1
+// =============================================================================
+
+define( 'RTC_TEST_ENV_OPTION',        'rtc_test_env' );
+define( 'RTC_TEST_CONCURRENT_OPTION', 'rtc_test_concurrent' );
+define( 'RTC_TEST_DB_VERSION',        '1' );
+define( 'RTC_TEST_LOG_MAX',           500 );
+define( 'RTC_TEST_REQUEST_HEADER',    'HTTP_X_RTC_TEST' );
+define( 'RTC_TEST_SCENARIO_HEADER',   'HTTP_X_RTC_SCENARIO' );
+
+// -------------------------------------------------------------------------
+// Monitor: table helpers
+// -------------------------------------------------------------------------
+
+function rtctest_log_table() {
+	global $wpdb;
+	return $wpdb->prefix . 'rtctest_log';
+}
+
+function rtctest_ensure_table() {
+	if ( get_option( 'rtctest_db_version' ) === RTC_TEST_DB_VERSION ) {
+		return;
+	}
+
+	global $wpdb;
+	$table           = rtctest_log_table();
+	$charset_collate = $wpdb->get_charset_collate();
+
+	$sql = "CREATE TABLE IF NOT EXISTS {$table} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  ts int(11) NOT NULL DEFAULT 0,
+  scenario varchar(100) NOT NULL DEFAULT 'unknown',
+  ms float NOT NULL DEFAULT 0,
+  total_ms float NOT NULL DEFAULT 0,
+  cpu_ms float NOT NULL DEFAULT 0,
+  total_cpu_ms float NOT NULL DEFAULT 0,
+  db_queries int(11) NOT NULL DEFAULT 0,
+  db_time_ms float NOT NULL DEFAULT 0,
+  memory_delta bigint(20) NOT NULL DEFAULT 0,
+  peak_memory bigint(20) NOT NULL DEFAULT 0,
+  status int(11) NOT NULL DEFAULT 200,
+  rooms int(11) NOT NULL DEFAULT 0,
+  updates_in int(11) NOT NULL DEFAULT 0,
+  updates_out int(11) NOT NULL DEFAULT 0,
+  response_bytes int(11) NOT NULL DEFAULT 0,
+  awareness_count int(11) NOT NULL DEFAULT 0,
+  should_compact tinyint(1) NOT NULL DEFAULT 0,
+  total_updates int(11) NOT NULL DEFAULT 0,
+  concurrent int(11) NOT NULL DEFAULT 0,
+  PRIMARY KEY  (id),
+  KEY scenario (scenario),
+  KEY ts (ts)
+) {$charset_collate};";
+
+	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+	dbDelta( $sql );
+	update_option( 'rtctest_db_version', RTC_TEST_DB_VERSION, true );
+}
+
+function rtctest_drop_table() {
+	global $wpdb;
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$wpdb->query( 'DROP TABLE IF EXISTS ' . rtctest_log_table() );
+	delete_option( 'rtctest_db_version' );
+}
+
+rtctest_ensure_table();
+
+// -------------------------------------------------------------------------
+// Monitor: request lifecycle hooks
+// -------------------------------------------------------------------------
+
+add_filter( 'rest_pre_dispatch',  'rtctest_pre_dispatch',  10, 3 );
+add_filter( 'rest_post_dispatch', 'rtctest_post_dispatch', 10, 3 );
+
+function rtctest_pre_dispatch( $result, $server, $request ) {
+	if ( ! isset( $_SERVER[ RTC_TEST_REQUEST_HEADER ] ) ) {
+		return $result;
+	}
+	if ( false === strpos( $request->get_route(), '/wp-sync/' ) ) {
+		return $result;
+	}
+
+	global $wpdb;
+
+	$GLOBALS['rtctest_wall_start'] = microtime( true );
+
+	// Atomic concurrency increment before the query baseline snapshot.
+	$GLOBALS['rtctest_concurrent_at_start'] = rtctest_increment_concurrent();
+	register_shutdown_function( 'rtctest_decrement_concurrent' );
+
+	$GLOBALS['rtctest_queries_start'] = $wpdb->num_queries;
+	$GLOBALS['rtctest_dbtime_start']  = rtctest_db_time_so_far();
+	$GLOBALS['rtctest_memory_start']  = memory_get_usage( true );
+
+	$ru = getrusage();
+	$GLOBALS['rtctest_cpu_start'] = (int) $ru['ru_utime.tv_sec'] * 1000000 + (int) $ru['ru_utime.tv_usec']
+	                              + (int) $ru['ru_stime.tv_sec'] * 1000000 + (int) $ru['ru_stime.tv_usec'];
+
+	return $result;
+}
+
+function rtctest_post_dispatch( $response, $server, $request ) {
+	if ( ! isset( $GLOBALS['rtctest_wall_start'] ) ) {
+		return $response;
+	}
+
+	global $wpdb;
+
+	$wall_ms      = round( ( microtime( true ) - $GLOBALS['rtctest_wall_start'] ) * 1000, 2 );
+	$db_queries   = $wpdb->num_queries - $GLOBALS['rtctest_queries_start'];
+	$db_time_ms   = round( ( rtctest_db_time_so_far() - $GLOBALS['rtctest_dbtime_start'] ) * 1000, 2 );
+	$memory_delta = memory_get_usage( true ) - $GLOBALS['rtctest_memory_start'];
+
+	$ru      = getrusage();
+	$cpu_end = (int) $ru['ru_utime.tv_sec'] * 1000000 + (int) $ru['ru_utime.tv_usec']
+	         + (int) $ru['ru_stime.tv_sec'] * 1000000 + (int) $ru['ru_stime.tv_usec'];
+	$cpu_ms       = round( ( $cpu_end - $GLOBALS['rtctest_cpu_start'] ) / 1000, 2 );
+	$total_cpu_ms = isset( $GLOBALS['rtctest_boot_cpu'] )
+		? round( ( $cpu_end - $GLOBALS['rtctest_boot_cpu'] ) / 1000, 2 )
+		: 0.0;
+
+	$request_start = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : 0.0;
+	$total_ms      = $request_start > 0
+		? round( ( microtime( true ) - $request_start ) * 1000, 2 )
+		: 0.0;
+
+	$scenario = isset( $_SERVER[ RTC_TEST_SCENARIO_HEADER ] )
+		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_SCENARIO_HEADER ] ) )
+		: 'unknown';
+
+	$data      = $response->get_data();
+	$rooms_in  = $request->get_param( 'rooms' ) ?? array();
+	$rooms_out = isset( $data['rooms'] ) && is_array( $data['rooms'] ) ? $data['rooms'] : array();
+
+	$updates_in = 0;
+	foreach ( $rooms_in as $r ) {
+		$updates_in += isset( $r['updates'] ) ? count( $r['updates'] ) : 0;
+	}
+
+	$updates_out = 0;
+	foreach ( $rooms_out as $r ) {
+		$updates_out += isset( $r['updates'] ) ? count( $r['updates'] ) : 0;
+	}
+
+	$first_room_out  = ! empty( $rooms_out ) ? $rooms_out[0] : array();
+	$awareness_count = isset( $first_room_out['awareness'] ) && is_array( $first_room_out['awareness'] )
+		? count( $first_room_out['awareness'] )
+		: 0;
+	$should_compact = isset( $first_room_out['should_compact'] ) ? (bool) $first_room_out['should_compact'] : false;
+	$total_updates  = isset( $first_room_out['total_updates'] ) ? (int) $first_room_out['total_updates'] : 0;
+	$response_bytes = strlen( wp_json_encode( $data ) );
+
+	$wpdb->insert(
+		rtctest_log_table(),
+		array(
+			'ts'              => time(),
+			'scenario'        => $scenario,
+			'ms'              => $wall_ms,
+			'total_ms'        => $total_ms,
+			'cpu_ms'          => $cpu_ms,
+			'total_cpu_ms'    => $total_cpu_ms,
+			'db_queries'      => $db_queries,
+			'db_time_ms'      => $db_time_ms,
+			'memory_delta'    => $memory_delta,
+			'peak_memory'     => memory_get_peak_usage( true ),
+			'status'          => $response->get_status(),
+			'rooms'           => count( $rooms_in ),
+			'updates_in'      => $updates_in,
+			'updates_out'     => $updates_out,
+			'response_bytes'  => $response_bytes,
+			'awareness_count' => $awareness_count,
+			'should_compact'  => $should_compact ? 1 : 0,
+			'total_updates'   => $total_updates,
+			'concurrent'      => $GLOBALS['rtctest_concurrent_at_start'],
+		),
+		array(
+			'%d', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
+			'%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d',
+		)
+	);
+
+	unset(
+		$GLOBALS['rtctest_wall_start'],
+		$GLOBALS['rtctest_queries_start'],
+		$GLOBALS['rtctest_dbtime_start'],
+		$GLOBALS['rtctest_memory_start'],
+		$GLOBALS['rtctest_cpu_start'],
+		$GLOBALS['rtctest_concurrent_at_start']
+	);
+
+	return $response;
+}
+
+// -------------------------------------------------------------------------
+// Monitor: concurrency counter helpers
+// -------------------------------------------------------------------------
+
+function rtctest_db_time_so_far() {
+	global $wpdb;
+	if ( ! defined( 'SAVEQUERIES' ) || ! SAVEQUERIES || ! is_array( $wpdb->queries ) ) {
+		return 0.0;
+	}
+	$total = 0.0;
+	foreach ( $wpdb->queries as $q ) {
+		$total += isset( $q[1] ) ? (float) $q[1] : 0.0;
+	}
+	return $total;
+}
+
+function rtctest_increment_concurrent() {
+	global $wpdb;
+	$wpdb->query(
+		$wpdb->prepare(
+			"INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
+			 VALUES (%s, '1', 'no')
+			 ON DUPLICATE KEY UPDATE option_value = CAST(option_value AS UNSIGNED) + 1",
+			RTC_TEST_CONCURRENT_OPTION
+		)
+	);
+	return (int) $wpdb->get_var(
+		$wpdb->prepare(
+			"SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+			RTC_TEST_CONCURRENT_OPTION
+		)
+	);
+}
+
+function rtctest_decrement_concurrent() {
+	global $wpdb;
+	$wpdb->query(
+		$wpdb->prepare(
+			"UPDATE {$wpdb->options}
+			 SET option_value = GREATEST(CAST(option_value AS UNSIGNED), 1) - 1
+			 WHERE option_name = %s",
+			RTC_TEST_CONCURRENT_OPTION
+		)
+	);
+}
+
+// -------------------------------------------------------------------------
+// Monitor: REST endpoints (rtc-test/v1)
+// -------------------------------------------------------------------------
+
+add_action( 'rest_api_init', 'rtctest_register_routes' );
+
+function rtctest_register_routes() {
+	$cap_check = static function() {
+		return current_user_can( 'edit_posts' );
+	};
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/log',
+		array(
+			array(
+				'methods'             => WP_REST_Server::READABLE,
+				'callback'            => static function() {
+					global $wpdb;
+					$rows = $wpdb->get_results(
+						$wpdb->prepare(
+							'SELECT * FROM ' . rtctest_log_table() . ' ORDER BY id ASC LIMIT %d',
+							RTC_TEST_LOG_MAX
+						),
+						ARRAY_A
+					);
+					foreach ( $rows as &$row ) {
+						$row['id']              = (int) $row['id'];
+						$row['ts']              = (int) $row['ts'];
+						$row['ms']              = (float) $row['ms'];
+						$row['total_ms']        = (float) $row['total_ms'];
+						$row['cpu_ms']          = (float) $row['cpu_ms'];
+						$row['total_cpu_ms']    = (float) $row['total_cpu_ms'];
+						$row['db_queries']      = (int) $row['db_queries'];
+						$row['db_time_ms']      = (float) $row['db_time_ms'];
+						$row['memory_delta']    = (int) $row['memory_delta'];
+						$row['peak_memory']     = (int) $row['peak_memory'];
+						$row['status']          = (int) $row['status'];
+						$row['rooms']           = (int) $row['rooms'];
+						$row['updates_in']      = (int) $row['updates_in'];
+						$row['updates_out']     = (int) $row['updates_out'];
+						$row['response_bytes']  = (int) $row['response_bytes'];
+						$row['awareness_count'] = (int) $row['awareness_count'];
+						$row['should_compact']  = (bool) $row['should_compact'];
+						$row['total_updates']   = (int) $row['total_updates'];
+						$row['concurrent']      = (int) $row['concurrent'];
+					}
+					unset( $row );
+					return rest_ensure_response( $rows );
+				},
+				'permission_callback' => $cap_check,
+			),
+			array(
+				'methods'             => WP_REST_Server::DELETABLE,
+				'callback'            => static function() {
+					global $wpdb;
+					// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+					$wpdb->query( 'DELETE FROM ' . rtctest_log_table() );
+					return rest_ensure_response( array( 'cleared' => true ) );
+				},
+				'permission_callback' => $cap_check,
+			),
+		)
+	);
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/table',
+		array(
+			'methods'             => WP_REST_Server::DELETABLE,
+			'callback'            => static function() {
+				rtctest_drop_table();
+				return rest_ensure_response( array( 'dropped' => true ) );
+			},
+			'permission_callback' => $cap_check,
+		)
+	);
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/env',
+		array(
+			'methods'             => WP_REST_Server::READABLE,
+			'callback'            => 'rtctest_get_env',
+			'permission_callback' => $cap_check,
+		)
+	);
+}
+
+function rtctest_get_env() {
+	global $wpdb;
+
+	if ( ! function_exists( 'get_plugins' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+	}
+	$gutenberg_file    = 'gutenberg/gutenberg.php';
+	$all_plugins       = get_plugins();
+	$gutenberg_data    = $all_plugins[ $gutenberg_file ] ?? null;
+	$gutenberg_version = $gutenberg_data ? $gutenberg_data['Version'] : 'not-found';
+	$gutenberg_active  = is_plugin_active( $gutenberg_file );
+
+	$compaction_threshold = class_exists( 'WP_HTTP_Polling_Sync_Server' )
+		? WP_HTTP_Polling_Sync_Server::COMPACTION_THRESHOLD
+		: null;
+	$awareness_timeout_s = class_exists( 'WP_HTTP_Polling_Sync_Server' )
+		? WP_HTTP_Polling_Sync_Server::AWARENESS_TIMEOUT
+		: null;
+	$storage_backend   = class_exists( 'WP_Sync_Post_Meta_Storage' ) ? 'post_meta' : 'unknown';
+	$storage_post_type = class_exists( 'WP_Sync_Post_Meta_Storage' )
+		? WP_Sync_Post_Meta_Storage::POST_TYPE
+		: null;
+
+	$env = array(
+		'php_version'          => PHP_VERSION,
+		'wp_version'           => get_bloginfo( 'version' ),
+		'db_version'           => $wpdb->db_version(),
+		'gutenberg_version'    => $gutenberg_version,
+		'gutenberg_active'     => $gutenberg_active,
+		'ext_object_cache'     => wp_using_ext_object_cache(),
+		'savequeries'          => defined( 'SAVEQUERIES' ) && SAVEQUERIES,
+		'compaction_threshold' => $compaction_threshold,
+		'awareness_timeout_s'  => $awareness_timeout_s,
+		'storage_backend'      => $storage_backend,
+		'storage_post_type'    => $storage_post_type,
+		'captured_at'          => time(),
+	);
+
+	update_option( RTC_TEST_ENV_OPTION, $env, false );
+
+	return rest_ensure_response( $env );
+}
+
+// -------------------------------------------------------------------------
+// Monitor: AJAX nonce endpoint (cookie auth)
+// -------------------------------------------------------------------------
+
+add_action( 'wp_ajax_rtctest_nonce', 'rtctest_ajax_nonce' );
+
+function rtctest_ajax_nonce() {
+	if ( ! current_user_can( 'edit_posts' ) ) {
+		wp_die( 'Forbidden', '', array( 'response' => 403 ) );
+	}
+	wp_send_json( array( 'nonce' => wp_create_nonce( 'wp_rest' ) ) );
+}
+
+// -------------------------------------------------------------------------
+// Monitor: admin page (Tools > RTC Tests)
+// -------------------------------------------------------------------------
+
+add_action( 'admin_menu', 'rtctest_admin_menu' );
+
+function rtctest_admin_menu() {
+	add_management_page(
+		'RTC Test Monitor',
+		'RTC Tests',
+		'manage_options',
+		'rtc-test-monitor',
+		'rtctest_admin_page'
+	);
+}
+
+function rtctest_admin_page() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		return;
+	}
+
+	global $wpdb;
+	$table = rtctest_log_table();
+
+	if ( isset( $_POST['rtctest_clear'] ) && check_admin_referer( 'rtctest_settings' ) ) {
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		$wpdb->query( "DELETE FROM {$table}" );
+		echo '<div class="notice notice-success"><p>Log cleared.</p></div>';
+	}
+
+	if ( isset( $_POST['rtctest_reset'] ) && check_admin_referer( 'rtctest_settings' ) ) {
+		rtctest_drop_table();
+		echo '<div class="notice notice-success"><p>Table dropped. It will be recreated on the next tagged request.</p></div>';
+	}
+
+	$log_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );  // phpcs:ignore
+	$log       = $wpdb->get_results(
+		$wpdb->prepare( "SELECT * FROM {$table} ORDER BY id ASC LIMIT %d", RTC_TEST_LOG_MAX ),
+		ARRAY_A
+	);
+
+	$scenarios = array();
+	foreach ( $log as $entry ) {
+		$s = $entry['scenario'];
+		if ( ! isset( $scenarios[ $s ] ) ) {
+			$scenarios[ $s ] = array(
+				'count'            => 0,
+				'ms_sum'           => 0.0,
+				'ms_sq_sum'        => 0.0,
+				'cpu_ms_sum'       => 0.0,
+				'total_cpu_ms_sum' => 0.0,
+				'db_queries_sum'   => 0,
+				'db_time_sum'      => 0.0,
+				'updates_in_sum'   => 0,
+				'updates_out_sum'  => 0,
+				'compact_count'    => 0,
+				'max_concurrent'   => 0,
+			);
+		}
+		$r  = &$scenarios[ $s ];
+		$r['count']++;
+		$r['ms_sum']           += (float) $entry['ms'];
+		$r['ms_sq_sum']        += (float) $entry['ms'] * (float) $entry['ms'];
+		$r['cpu_ms_sum']       += (float) $entry['cpu_ms'];
+		$r['total_cpu_ms_sum'] += (float) $entry['total_cpu_ms'];
+		$r['db_queries_sum']   += (int) $entry['db_queries'];
+		$r['db_time_sum']      += (float) $entry['db_time_ms'];
+		$r['updates_in_sum']   += (int) $entry['updates_in'];
+		$r['updates_out_sum']  += (int) $entry['updates_out'];
+		if ( ! empty( $entry['should_compact'] ) ) {
+			$r['compact_count']++;
+		}
+		if ( (int) $entry['concurrent'] > $r['max_concurrent'] ) {
+			$r['max_concurrent'] = (int) $entry['concurrent'];
+		}
+	}
+
+	$baseline_mean = 0.0;
+	if ( isset( $scenarios['baseline'] ) && $scenarios['baseline']['count'] > 0 ) {
+		$baseline_mean = $scenarios['baseline']['ms_sum'] / $scenarios['baseline']['count'];
+	}
+
+	$recent = $wpdb->get_results(
+		"SELECT * FROM {$table} ORDER BY id DESC LIMIT 50", // phpcs:ignore
+		ARRAY_A
+	);
+
+	?>
+	<div class="wrap">
+		<h1>RTC Test Monitor</h1>
+
+		<form method="post">
+			<?php wp_nonce_field( 'rtctest_settings' ); ?>
+			<p>
+				<input type="submit" name="rtctest_clear" class="button" value="Clear Log (<?php echo esc_attr( $log_count ); ?> rows)"
+					onclick="return confirm('Delete all <?php echo esc_attr( $log_count ); ?> log rows? Table structure is preserved.');" />
+				<input type="submit" name="rtctest_reset" class="button" value="Drop Table"
+					onclick="return confirm('Drop the log table entirely? It will be recreated on the next tagged request.');"
+					style="margin-left:8px;" />
+			</p>
+		</form>
+
+		<h2>Summary (<?php echo esc_html( $log_count ); ?> total rows<?php echo $log_count > RTC_TEST_LOG_MAX ? ', showing last ' . RTC_TEST_LOG_MAX : ''; ?>)</h2>
+
+		<?php if ( empty( $scenarios ) ) : ?>
+			<p>No test data yet. Run <code>rtc-test.sh</code> with tagged requests to populate this log.</p>
+		<?php else : ?>
+			<table class="widefat striped">
+				<thead>
+					<tr>
+						<th>Scenario</th>
+						<th>Requests</th>
+						<th>Mean disp_ms</th>
+						<th>Mean cpu_ms</th>
+						<th>Mean tot_cpu_ms</th>
+						<th>Stddev disp_ms</th>
+						<?php if ( $baseline_mean > 0 ) : ?><th>disp_ms / baseline</th><?php endif; ?>
+						<th>Mean DB queries</th>
+						<th>Mean DB time ms</th>
+						<th>Updates in (sum)</th>
+						<th>Updates out (sum)</th>
+						<th>Compact triggers</th>
+						<th>Max concurrent</th>
+					</tr>
+				</thead>
+				<tbody>
+				<?php foreach ( $scenarios as $name => $r ) : ?>
+					<?php
+					$count             = $r['count'];
+					$mean_ms           = round( $r['ms_sum'] / $count, 2 );
+					$mean_cpu_ms       = round( $r['cpu_ms_sum'] / $count, 2 );
+					$mean_total_cpu_ms = round( $r['total_cpu_ms_sum'] / $count, 2 );
+					$variance          = ( $r['ms_sq_sum'] / $count ) - ( $mean_ms * $mean_ms );
+					$stddev_ms         = round( sqrt( max( 0.0, $variance ) ), 2 );
+					$mean_db_q         = round( $r['db_queries_sum'] / $count, 1 );
+					$mean_db_t         = round( $r['db_time_sum'] / $count, 2 );
+					$ratio             = $baseline_mean > 0 ? round( $mean_ms / $baseline_mean, 2 ) : null;
+					?>
+					<tr>
+						<td><?php echo esc_html( $name ); ?></td>
+						<td><?php echo esc_html( $count ); ?></td>
+						<td><?php echo esc_html( $mean_ms ); ?></td>
+						<td><?php echo esc_html( $mean_cpu_ms ); ?></td>
+						<td><?php echo esc_html( $mean_total_cpu_ms ); ?></td>
+						<td><?php echo esc_html( $stddev_ms ); ?></td>
+						<?php if ( $baseline_mean > 0 ) : ?>
+							<td><?php echo null !== $ratio ? esc_html( $ratio ) . 'x' : '-'; ?></td>
+						<?php endif; ?>
+						<td><?php echo esc_html( $mean_db_q ); ?></td>
+						<td><?php echo esc_html( $mean_db_t ); ?></td>
+						<td><?php echo esc_html( $r['updates_in_sum'] ); ?></td>
+						<td><?php echo esc_html( $r['updates_out_sum'] ); ?></td>
+						<td><?php echo esc_html( $r['compact_count'] ); ?></td>
+						<td><?php echo esc_html( $r['max_concurrent'] ); ?></td>
+					</tr>
+				<?php endforeach; ?>
+				</tbody>
+			</table>
+		<?php endif; ?>
+
+		<h2>Recent Entries (last 50, newest first)</h2>
+		<table class="widefat striped" style="font-size:12px;">
+			<thead>
+				<tr>
+					<th>Time</th>
+					<th>Scenario</th>
+					<th>disp_ms</th>
+					<th>total_ms</th>
+					<th>cpu_ms</th>
+					<th>tot_cpu_ms</th>
+					<th>DB queries</th>
+					<th>DB time ms</th>
+					<th>Peak mem (MB)</th>
+					<th>Mem delta (KB)</th>
+					<th>Status</th>
+					<th>Updates in</th>
+					<th>Updates out</th>
+					<th>Resp bytes</th>
+					<th>Awareness</th>
+					<th>Total updates</th>
+					<th>Compact?</th>
+					<th>Concurrent</th>
+				</tr>
+			</thead>
+			<tbody>
+			<?php foreach ( $recent as $entry ) : ?>
+				<tr>
+					<td><?php echo esc_html( gmdate( 'H:i:s', (int) $entry['ts'] ) ); ?></td>
+					<td><?php echo esc_html( $entry['scenario'] ); ?></td>
+					<td><?php echo esc_html( $entry['ms'] ); ?></td>
+					<td><?php echo esc_html( $entry['total_ms'] ); ?></td>
+					<td><?php echo esc_html( $entry['cpu_ms'] ); ?></td>
+					<td><?php echo esc_html( $entry['total_cpu_ms'] ); ?></td>
+					<td><?php echo esc_html( $entry['db_queries'] ); ?></td>
+					<td><?php echo esc_html( $entry['db_time_ms'] ); ?></td>
+					<td><?php echo esc_html( round( (int) $entry['peak_memory'] / 1048576, 1 ) ); ?></td>
+					<td><?php echo esc_html( round( (int) $entry['memory_delta'] / 1024, 1 ) ); ?></td>
+					<td><?php echo esc_html( $entry['status'] ); ?></td>
+					<td><?php echo esc_html( $entry['updates_in'] ); ?></td>
+					<td><?php echo esc_html( $entry['updates_out'] ); ?></td>
+					<td><?php echo esc_html( $entry['response_bytes'] ); ?></td>
+					<td><?php echo esc_html( $entry['awareness_count'] ); ?></td>
+					<td><?php echo esc_html( $entry['total_updates'] ); ?></td>
+					<td><?php echo empty( $entry['should_compact'] ) ? '' : 'yes'; ?></td>
+					<td><?php echo esc_html( $entry['concurrent'] ); ?></td>
+				</tr>
+			<?php endforeach; ?>
+			</tbody>
+		</table>
+	</div>
+	<?php
+}
+
+// =============================================================================
+// CAPTURE -- records real browser /wp-sync/ sessions as replay fixtures
+// =============================================================================
+
+define( 'RTCAP_DB_VERSION', '1' );
+
+// -------------------------------------------------------------------------
+// Capture: table helpers
+// -------------------------------------------------------------------------
+
+function rtcap_frames_table() {
+	global $wpdb;
+	return $wpdb->prefix . 'rtcap_frames';
+}
+
+function rtcap_ensure_table() {
+	if ( get_option( 'rtcap_db_version' ) === RTCAP_DB_VERSION ) {
+		return;
+	}
+
+	global $wpdb;
+	$table           = rtcap_frames_table();
+	$charset_collate = $wpdb->get_charset_collate();
+
+	$sql = "CREATE TABLE IF NOT EXISTS {$table} (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  session_id varchar(100) NOT NULL DEFAULT '',
+  ts_us bigint(20) NOT NULL DEFAULT 0,
+  elapsed_ms float NOT NULL DEFAULT 0,
+  client_id bigint(20) NOT NULL DEFAULT 0,
+  room varchar(200) NOT NULL DEFAULT '',
+  request_body longtext NOT NULL,
+  response_body longtext NOT NULL,
+  PRIMARY KEY  (id),
+  KEY session_id (session_id),
+  KEY ts_us (ts_us)
+) {$charset_collate};";
+
+	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+	dbDelta( $sql );
+	update_option( 'rtcap_db_version', RTCAP_DB_VERSION, true );
+}
+
+function rtcap_drop_table() {
+	global $wpdb;
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$wpdb->query( 'DROP TABLE IF EXISTS ' . rtcap_frames_table() );
+	delete_option( 'rtcap_db_version' );
+	delete_option( 'rtcap_session' );
+	delete_option( 'rtcap_started_us' );
+	delete_option( 'rtcap_room_filter' );
+}
+
+rtcap_ensure_table();
+
+// -------------------------------------------------------------------------
+// Capture: session state helpers
+// -------------------------------------------------------------------------
+
+function rtcap_active_session() {
+	return (string) get_option( 'rtcap_session', '' );
+}
+
+function rtcap_started_us() {
+	return (int) get_option( 'rtcap_started_us', 0 );
+}
+
+function rtcap_room_filter() {
+	return (string) get_option( 'rtcap_room_filter', '' );
+}
+
+// -------------------------------------------------------------------------
+// Capture: request lifecycle hooks
+// -------------------------------------------------------------------------
+
+add_filter( 'rest_pre_dispatch',  'rtcap_pre_dispatch',  10, 3 );
+add_filter( 'rest_post_dispatch', 'rtcap_post_dispatch', 10, 3 );
+
+function rtcap_pre_dispatch( $result, $server, $request ) {
+	if ( false === strpos( $request->get_route(), '/wp-sync/' ) ) {
+		return $result;
+	}
+
+	$session = rtcap_active_session();
+	if ( '' === $session ) {
+		return $result;
+	}
+
+	$room_filter = rtcap_room_filter();
+	if ( '' !== $room_filter ) {
+		$rooms_param = $request->get_param( 'rooms' );
+		if ( ! is_array( $rooms_param ) ) {
+			return $result;
+		}
+		$matched = false;
+		foreach ( $rooms_param as $r ) {
+			if ( isset( $r['room'] ) && $r['room'] === $room_filter ) {
+				$matched = true;
+				break;
+			}
+		}
+		if ( ! $matched ) {
+			return $result;
+		}
+	}
+
+	$rooms_param = $request->get_param( 'rooms' );
+	$first_room  = is_array( $rooms_param ) && ! empty( $rooms_param ) ? $rooms_param[0] : array();
+
+	$GLOBALS['rtcap_active_session']  = $session;
+	$GLOBALS['rtcap_request_body']    = $request->get_body();
+	$GLOBALS['rtcap_ts_us']           = (int) round( microtime( true ) * 1000000 );
+	$GLOBALS['rtcap_session_started'] = rtcap_started_us();
+	$GLOBALS['rtcap_client_id']       = isset( $first_room['client_id'] ) ? (int) $first_room['client_id'] : 0;
+	$GLOBALS['rtcap_room']            = isset( $first_room['room'] )      ? (string) $first_room['room']    : '';
+
+	return $result;
+}
+
+function rtcap_post_dispatch( $response, $server, $request ) {
+	if ( ! isset( $GLOBALS['rtcap_active_session'] ) ) {
+		return $response;
+	}
+
+	global $wpdb;
+
+	$ts_us      = $GLOBALS['rtcap_ts_us'];
+	$started    = $GLOBALS['rtcap_session_started'];
+	$elapsed_ms = $started > 0 ? round( ( $ts_us - $started ) / 1000, 2 ) : 0.0;
+
+	$wpdb->insert(
+		rtcap_frames_table(),
+		array(
+			'session_id'    => $GLOBALS['rtcap_active_session'],
+			'ts_us'         => $ts_us,
+			'elapsed_ms'    => $elapsed_ms,
+			'client_id'     => $GLOBALS['rtcap_client_id'],
+			'room'          => $GLOBALS['rtcap_room'],
+			'request_body'  => $GLOBALS['rtcap_request_body'],
+			'response_body' => wp_json_encode( $response->get_data() ),
+		),
+		array( '%s', '%d', '%f', '%d', '%s', '%s', '%s' )
+	);
+
+	unset(
+		$GLOBALS['rtcap_active_session'],
+		$GLOBALS['rtcap_request_body'],
+		$GLOBALS['rtcap_ts_us'],
+		$GLOBALS['rtcap_session_started'],
+		$GLOBALS['rtcap_client_id'],
+		$GLOBALS['rtcap_room']
+	);
+
+	return $response;
+}
+
+// -------------------------------------------------------------------------
+// Capture: REST endpoints (rtc-capture/v1)
+// -------------------------------------------------------------------------
+
+add_action( 'rest_api_init', 'rtcap_register_routes' );
+
+function rtcap_register_routes() {
+	$cap = static function() { return current_user_can( 'edit_posts' ); };
+
+	register_rest_route( 'rtc-capture/v1', '/session/start', array(
+		'methods'             => WP_REST_Server::CREATABLE,
+		'callback'            => 'rtcap_rest_start',
+		'permission_callback' => $cap,
+	) );
+
+	register_rest_route( 'rtc-capture/v1', '/session/stop', array(
+		'methods'             => WP_REST_Server::CREATABLE,
+		'callback'            => 'rtcap_rest_stop',
+		'permission_callback' => $cap,
+	) );
+
+	register_rest_route( 'rtc-capture/v1', '/sessions', array(
+		array(
+			'methods'             => WP_REST_Server::READABLE,
+			'callback'            => 'rtcap_rest_list',
+			'permission_callback' => $cap,
+		),
+		array(
+			'methods'             => WP_REST_Server::DELETABLE,
+			'callback'            => static function() {
+				rtcap_drop_table();
+				return rest_ensure_response( array( 'dropped' => true ) );
+			},
+			'permission_callback' => $cap,
+		),
+	) );
+
+	// /session/start and /session/stop are literal paths registered above
+	// and match before this regex pattern.
+	register_rest_route( 'rtc-capture/v1', '/session/(?P<id>[a-zA-Z0-9_-]+)', array(
+		array(
+			'methods'             => WP_REST_Server::READABLE,
+			'callback'            => 'rtcap_rest_export',
+			'permission_callback' => $cap,
+		),
+		array(
+			'methods'             => WP_REST_Server::DELETABLE,
+			'callback'            => 'rtcap_rest_delete',
+			'permission_callback' => $cap,
+		),
+	) );
+}
+
+function rtcap_rest_start( WP_REST_Request $request ) {
+	$session_id  = sanitize_text_field( (string) ( $request->get_param( 'session_id' )  ?? '' ) );
+	$room_filter = sanitize_text_field( (string) ( $request->get_param( 'room_filter' ) ?? '' ) );
+
+	if ( '' === $session_id ) {
+		return new WP_Error( 'missing_session_id', 'session_id is required', array( 'status' => 400 ) );
+	}
+
+	$now_us = (int) round( microtime( true ) * 1000000 );
+	update_option( 'rtcap_session',     $session_id,  true );
+	update_option( 'rtcap_started_us',  $now_us,       true );
+	update_option( 'rtcap_room_filter', $room_filter,  true );
+
+	return rest_ensure_response( array(
+		'started'     => true,
+		'session_id'  => $session_id,
+		'room_filter' => $room_filter,
+		'started_us'  => $now_us,
+	) );
+}
+
+function rtcap_rest_stop() {
+	$session_id = rtcap_active_session();
+	if ( '' === $session_id ) {
+		return new WP_Error( 'no_active_session', 'No capture session is active', array( 'status' => 400 ) );
+	}
+
+	global $wpdb;
+	$frames = (int) $wpdb->get_var( $wpdb->prepare(
+		'SELECT COUNT(*) FROM ' . rtcap_frames_table() . ' WHERE session_id = %s',
+		$session_id
+	) );
+
+	update_option( 'rtcap_session',     '', true );
+	update_option( 'rtcap_room_filter', '', true );
+
+	return rest_ensure_response( array(
+		'stopped'    => true,
+		'session_id' => $session_id,
+		'frames'     => $frames,
+	) );
+}
+
+function rtcap_rest_list() {
+	global $wpdb;
+	$table = rtcap_frames_table();
+
+	$rows = $wpdb->get_results(
+		"SELECT session_id, COUNT(*) AS frames,
+		        MIN(ts_us) AS first_us, MAX(ts_us) AS last_us
+		 FROM {$table} GROUP BY session_id ORDER BY first_us ASC",
+		ARRAY_A
+	);
+
+	$current  = rtcap_active_session();
+	$sessions = array();
+	foreach ( $rows as $row ) {
+		$sessions[] = array(
+			'session_id'  => $row['session_id'],
+			'frames'      => (int) $row['frames'],
+			'first_us'    => (int) $row['first_us'],
+			'last_us'     => (int) $row['last_us'],
+			'duration_ms' => (int) round( ( (int) $row['last_us'] - (int) $row['first_us'] ) / 1000 ),
+			'active'      => ( $row['session_id'] === $current ),
+		);
+	}
+
+	return rest_ensure_response( $sessions );
+}
+
+function rtcap_rest_export( WP_REST_Request $request ) {
+	$session_id = sanitize_text_field( $request->get_param( 'id' ) );
+
+	global $wpdb;
+	$rows = $wpdb->get_results( $wpdb->prepare(
+		'SELECT * FROM ' . rtcap_frames_table() . ' WHERE session_id = %s ORDER BY id ASC',
+		$session_id
+	), ARRAY_A );
+
+	if ( empty( $rows ) ) {
+		return new WP_Error( 'not_found', 'Session not found or has no frames', array( 'status' => 404 ) );
+	}
+
+	$frames = array();
+	$n      = 1;
+	foreach ( $rows as $row ) {
+		$frames[] = array(
+			'n'          => $n,
+			'elapsed_ms' => (float) $row['elapsed_ms'],
+			'client_id'  => (int) $row['client_id'],
+			'room'       => $row['room'],
+			'request'    => json_decode( $row['request_body'],  true ) ?? array(),
+			'response'   => json_decode( $row['response_body'], true ) ?? array(),
+		);
+		$n++;
+	}
+
+	return rest_ensure_response( array(
+		'session_id'  => $session_id,
+		'frame_count' => count( $frames ),
+		'frames'      => $frames,
+	) );
+}
+
+function rtcap_rest_delete( WP_REST_Request $request ) {
+	$session_id = sanitize_text_field( $request->get_param( 'id' ) );
+
+	global $wpdb;
+	$deleted = $wpdb->delete( rtcap_frames_table(), array( 'session_id' => $session_id ), array( '%s' ) );
+
+	return rest_ensure_response( array(
+		'deleted'    => true,
+		'session_id' => $session_id,
+		'rows'       => (int) $deleted,
+	) );
+}
+
+// -------------------------------------------------------------------------
+// Capture: WP-CLI commands
+// -------------------------------------------------------------------------
+
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+
+	/**
+	 * Manages RTC capture sessions.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *   wp rtc-capture start session-typing-a --room=postType/post:42
+	 *   wp rtc-capture stop
+	 *   wp rtc-capture list
+	 *   wp rtc-capture export session-typing-a
+	 *   wp rtc-capture drop session-typing-a
+	 *   wp rtc-capture drop --all
+	 */
+	class RTC_Capture_CLI extends WP_CLI_Command {
+
+		/**
+		 * Start a capture session.
+		 *
+		 * ## OPTIONS
+		 *
+		 * <session-id>
+		 * : Unique name for this session (alphanumeric, hyphens, underscores).
+		 *
+		 * [--room=<room>]
+		 * : Room identifier to filter on, e.g. postType/post:42. Omit to capture all rooms.
+		 *
+		 * @param array $args
+		 * @param array $assoc_args
+		 */
+		public function start( $args, $assoc_args ) {
+			if ( empty( $args[0] ) ) {
+				WP_CLI::error( 'Session ID is required.' );
+			}
+			$session_id  = sanitize_text_field( $args[0] );
+			$room_filter = isset( $assoc_args['room'] ) ? sanitize_text_field( $assoc_args['room'] ) : '';
+
+			$now_us = (int) round( microtime( true ) * 1000000 );
+			update_option( 'rtcap_session',     $session_id,  true );
+			update_option( 'rtcap_started_us',  $now_us,       true );
+			update_option( 'rtcap_room_filter', $room_filter,  true );
+
+			WP_CLI::success( sprintf(
+				'Capture started: %s%s',
+				$session_id,
+				$room_filter ? "  (room: {$room_filter})" : '  (all rooms)'
+			) );
+		}
+
+		/** Stop the current capture session. */
+		public function stop() {
+			$session_id = rtcap_active_session();
+			if ( '' === $session_id ) {
+				WP_CLI::error( 'No active capture session.' );
+			}
+
+			global $wpdb;
+			$frames = (int) $wpdb->get_var( $wpdb->prepare(
+				'SELECT COUNT(*) FROM ' . rtcap_frames_table() . ' WHERE session_id = %s',
+				$session_id
+			) );
+
+			update_option( 'rtcap_session',     '', true );
+			update_option( 'rtcap_room_filter', '', true );
+
+			WP_CLI::success( sprintf( 'Stopped: %s  (%d frames)', $session_id, $frames ) );
+		}
+
+		/** List all captured sessions. */
+		public function list() {
+			global $wpdb;
+			$table = rtcap_frames_table();
+			$rows  = $wpdb->get_results(
+				"SELECT session_id, COUNT(*) AS frames,
+				        MIN(ts_us) AS first_us, MAX(ts_us) AS last_us
+				 FROM {$table} GROUP BY session_id ORDER BY first_us ASC",
+				ARRAY_A
+			);
+
+			if ( empty( $rows ) ) {
+				WP_CLI::log( 'No sessions.' );
+				return;
+			}
+
+			$current = rtcap_active_session();
+			$items   = array();
+			foreach ( $rows as $row ) {
+				$items[] = array(
+					'session_id'  => $row['session_id'] . ( $row['session_id'] === $current ? ' *' : '' ),
+					'frames'      => $row['frames'],
+					'started'     => gmdate( 'H:i:s', (int) ( (int) $row['first_us'] / 1000000 ) ),
+					'duration_ms' => (int) round( ( (int) $row['last_us'] - (int) $row['first_us'] ) / 1000 ),
+				);
+			}
+
+			WP_CLI\Utils\format_items( 'table', $items, array( 'session_id', 'frames', 'started', 'duration_ms' ) );
+		}
+
+		/**
+		 * Print the REST export URL for a session.
+		 *
+		 * @param array $args
+		 */
+		public function export( $args ) {
+			if ( empty( $args[0] ) ) {
+				WP_CLI::error( 'Session ID is required.' );
+			}
+			$session_id = sanitize_text_field( $args[0] );
+			WP_CLI::log( rest_url( 'rtc-capture/v1/session/' . rawurlencode( $session_id ) ) );
+		}
+
+		/**
+		 * Delete a session or drop the entire table.
+		 *
+		 * ## OPTIONS
+		 *
+		 * [<session-id>]
+		 * : Session to delete. Omit and use --all to drop the entire table.
+		 *
+		 * [--all]
+		 * : Drop the entire frames table.
+		 *
+		 * @param array $args
+		 * @param array $assoc_args
+		 */
+		public function drop( $args, $assoc_args ) {
+			if ( ! empty( $assoc_args['all'] ) ) {
+				rtcap_drop_table();
+				WP_CLI::success( 'Table dropped.' );
+				return;
+			}
+
+			if ( empty( $args[0] ) ) {
+				WP_CLI::error( 'Provide a session ID or --all.' );
+			}
+
+			$session_id = sanitize_text_field( $args[0] );
+			global $wpdb;
+			$deleted = $wpdb->delete( rtcap_frames_table(), array( 'session_id' => $session_id ), array( '%s' ) );
+			WP_CLI::success( sprintf( 'Deleted %d rows for session: %s', (int) $deleted, $session_id ) );
+		}
+	}
+
+	WP_CLI::add_command( 'rtc-capture', 'RTC_Capture_CLI' );
+}

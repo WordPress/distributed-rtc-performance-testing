@@ -1,0 +1,1747 @@
+#!/usr/bin/env bash
+# rtc-test.sh -- WordPress RTC HTTP polling load tester
+#
+# Two-file package: drop rtc-test.php into mu-plugins, then use this script.
+#
+# Requirements: bash, curl
+# WP-CLI (wp) is used by setup/teardown if available; not needed for test commands.
+# python3 is required for the replay command only.
+#
+# Workflow A -- run everything on the web host (WP-CLI available):
+#   bash rtc-test.sh setup
+#   bash rtc-test.sh baseline
+#   bash rtc-test.sh sustain
+#   bash rtc-test.sh teardown
+#
+# Workflow B -- setup on web host, run tests from localhost:
+#   On web host:  bash rtc-test.sh setup
+#                 cat rtc-test.env          # copy output to clipboard
+#   On localhost: paste into rtc-test.env, then:
+#                 bash rtc-test.sh baseline
+#                 bash rtc-test.sh sustain
+#   On web host:  bash rtc-test.sh teardown
+#
+# Commands:
+#   setup               Create rtctest user + test post, write rtc-test.env
+#   teardown            Delete test post, remove rtc-test.env and cookie jar
+#   baseline            Measure ambient WP REST overhead (run before scenarios)
+#   single-idle         1 client, POLLS polls, no updates
+#   two-idle            2 clients alternating, awareness propagation check
+#   two-editing         2 clients: sync handshake + update exchange (1 pass)
+#   one-idle-one-editing 2 clients: 1 editor sends updates, 1 idle watches
+#   n-idle              N_CLIENTS clients round-robin, awareness only
+#   compaction-trigger  Send updates until should_compact fires, then compact
+#   report              Fetch log from plugin and print summary table
+#   clear               Delete all log entries (table intact)
+#   reset               Drop and recreate the log table
+
+set -euo pipefail
+
+# -------------------------------------------------------------------------
+# Config file auto-load
+# Source rtc-test.env (written by setup) before applying defaults so that
+# environment variables set by the caller still take precedence.
+# -------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "${SCRIPT_DIR}/rtc-test.env" ]; then
+	# Snapshot any variables the caller already set in the environment so we
+	# can restore them after sourcing -- env vars take precedence over the file.
+	_pre_url="${WP_URL:-}"
+	_pre_user="${WP_USER:-}"
+	_pre_pass="${WP_PASS:-}"
+	_pre_jar="${WP_COOKIE_JAR:-}"
+	_pre_nonce="${WP_NONCE:-}"
+	_pre_path="${WP_PATH:-}"
+	_pre_post="${POST_ID:-}"
+	# shellcheck source=/dev/null
+	. "${SCRIPT_DIR}/rtc-test.env"
+	[ -n "${_pre_url}"   ] && WP_URL="${_pre_url}"
+	[ -n "${_pre_user}"  ] && WP_USER="${_pre_user}"
+	[ -n "${_pre_pass}"  ] && WP_PASS="${_pre_pass}"
+	[ -n "${_pre_jar}"   ] && WP_COOKIE_JAR="${_pre_jar}"
+	[ -n "${_pre_nonce}" ] && WP_NONCE="${_pre_nonce}"
+	[ -n "${_pre_path}"  ] && WP_PATH="${_pre_path}"
+	[ -n "${_pre_post}"  ] && POST_ID="${_pre_post}"
+	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post
+fi
+
+# -------------------------------------------------------------------------
+# Configuration (all overridable via environment variables or rtc-test.env)
+# -------------------------------------------------------------------------
+
+WP_URL="${WP_URL:-http://localhost}"
+WP_USER="${WP_USER:-admin}"
+WP_PASS="${WP_PASS:-}"                                            # WP login password (set by setup)
+WP_COOKIE_JAR="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"  # cookie jar path (set by setup)
+WP_NONCE="${WP_NONCE:-}"                                          # wp_rest nonce (set by setup, ~12h TTL)
+WP_PATH="${WP_PATH:-}"       # Path to WordPress root; auto-detected by setup if empty
+POST_ID="${POST_ID:-1}"
+POLLS="${POLLS:-10}"
+POLL_DELAY="${POLL_DELAY:-1}"   # Seconds between polls per client (0 = immediate re-poll / stress mode)
+N_CLIENTS="${N_CLIENTS:-3}"
+DURATION="${DURATION:-30}"      # Seconds to run for sustain command
+UPDATE_SIZE="${UPDATE_SIZE:-small}"
+
+# -------------------------------------------------------------------------
+# Deterministic test constants
+# -------------------------------------------------------------------------
+
+# Client IDs are integers (REST schema: minimum 1).
+CLIENT_A=10001
+CLIENT_B=10002
+
+# Room identifier.
+ROOM="postType/post:${POST_ID}"
+
+# Fixed awareness payloads per client (minimal structure).
+AWARENESS_A='{"name":"RTC-Test-Client-A","color":"#cc0000"}'
+AWARENESS_B='{"name":"RTC-Test-Client-B","color":"#0000cc"}'
+
+# CRDT sync protocol payloads (base64-encoded, opaque to the server).
+# The server stores and relays these without CRDT validation.
+SYNC_STEP1_DATA="AA=="        # base64 of 0x00 -- minimal Yjs state vector (empty doc)
+SYNC_STEP2_DATA="AAAA"        # base64 of 0x00 0x00 0x00 -- minimal sync step 2 response
+
+# Update payloads by size (fixed, so tests are deterministic and reproducible).
+# small  = 3 decoded bytes  -- baseline latency
+# medium = 384 decoded bytes -- typical edit delta
+# large  = 3072 decoded bytes -- large paste / bulk edit
+UPDATE_SMALL="AQAB"
+# shellcheck disable=SC2016
+UPDATE_MEDIUM="$(printf '%0.sAQABAgACAwADBAA' {1..30} | head -c 512)"
+# shellcheck disable=SC2016
+UPDATE_LARGE="$(printf '%0.sAQABAgACAwADBAA' {1..280} | head -c 4096)"
+
+# Select payload based on UPDATE_SIZE.
+case "${UPDATE_SIZE}" in
+	medium) UPDATE_DATA="${UPDATE_MEDIUM}" ;;
+	large)  UPDATE_DATA="${UPDATE_LARGE}" ;;
+	*)      UPDATE_DATA="${UPDATE_SMALL}" ;;
+esac
+
+# -------------------------------------------------------------------------
+# Identification headers (present on every /wp-sync/ request)
+# -------------------------------------------------------------------------
+# X-RTC-Test: 1        -- tells the plugin to record this request
+# X-RTC-Scenario: <s>  -- labels the scenario in the log
+# -b sends cookies read-only (does not save new Set-Cookie headers), which is
+# safe for concurrent curl requests since all instances only read the jar.
+BASE_CURL_OPTS=(
+	--silent
+	--show-error
+	-b "${WP_COOKIE_JAR}"
+	-H "X-WP-Nonce: ${WP_NONCE}"
+	-H "X-RTC-Test: 1"
+	-H "Content-Type: application/json"
+)
+
+RTC_ENDPOINT="${WP_URL}/wp-json/wp-sync/v1/updates"
+PLUGIN_LOG_URL="${WP_URL}/wp-json/rtc-test/v1/log"
+PLUGIN_ENV_URL="${WP_URL}/wp-json/rtc-test/v1/env"
+PLUGIN_TABLE_URL="${WP_URL}/wp-json/rtc-test/v1/table"
+
+CAPTURE_SESSION_URL="${WP_URL}/wp-json/rtc-capture/v1/session"
+CAPTURE_SESSIONS_URL="${WP_URL}/wp-json/rtc-capture/v1/sessions"
+
+# -------------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------------
+
+# die MESSAGE
+die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
+
+# require_auth
+# Confirms that cookie jar and nonce are available before running a test command.
+require_auth() {
+	if [ ! -f "${WP_COOKIE_JAR}" ] || [ -z "${WP_NONCE}" ]; then
+		die "Auth not configured. Run: bash rtc-test.sh setup"
+	fi
+}
+
+# do_login USER PASS URL JAR
+# Logs in via wp-login.php and saves cookies to JAR.
+# Returns 0 if wordpress_logged_in cookie is present in JAR, 1 otherwise.
+do_login() {
+	local _user="$1" _pass="$2" _url="$3" _jar="$4"
+	# GET login page first to seed the test cookie that WP checks on POST.
+	curl -s -c "${_jar}" "${_url}/wp-login.php" -o /dev/null
+	# POST credentials. rememberme=forever gives a 14-day cookie vs 2-day default.
+	curl -s -c "${_jar}" -b "${_jar}" -L -o /dev/null \
+		--data-urlencode "log=${_user}" \
+		--data-urlencode "pwd=${_pass}" \
+		--data "wp-submit=Log+In&redirect_to=%2Fwp-admin%2F&testcookie=1&rememberme=forever" \
+		"${_url}/wp-login.php"
+	grep -q "wordpress_logged_in" "${_jar}" 2>/dev/null
+}
+
+# do_get_nonce URL JAR
+# Calls the rtctest_nonce AJAX handler and prints the wp_rest nonce.
+# Prints nothing if the call fails (caller should check for empty output).
+do_get_nonce() {
+	local _url="$1" _jar="$2"
+	curl -s -b "${_jar}" -X POST \
+		--data "action=rtctest_nonce" \
+		"${_url}/wp-admin/admin-ajax.php" \
+		| grep -o '"nonce":"[^"]*"' | head -1 | cut -d'"' -f4 || true
+}
+
+# rtc_post SCENARIO JSON_BODY
+# Posts to the RTC endpoint with the given scenario label.
+# Prints the raw response body followed by __HTTP_STATUS__:NNN on its own line.
+rtc_post() {
+	local scenario="$1"
+	local body="$2"
+	curl "${BASE_CURL_OPTS[@]}" \
+		-H "X-RTC-Scenario: ${scenario}" \
+		-X POST "${RTC_ENDPOINT}" \
+		-w '\n__HTTP_STATUS__:%{http_code}' \
+		-d "${body}"
+}
+
+# rtc_post_timed SCENARIO JSON_BODY
+# Same as rtc_post but appends timing breakdown lines measured by curl:
+#   __CLIENT_MS__:<total_ms>
+#   __CLIENT_TIMING__:<connect_ms>:<tls_ms>:<server_ms>:<transfer_ms>
+# where server_ms = time_starttransfer - time_pretransfer (PHP/DB processing only).
+rtc_post_timed() {
+	local scenario="$1"
+	local body="$2"
+	local timing
+	timing=$(curl "${BASE_CURL_OPTS[@]}" \
+		-H "X-RTC-Scenario: ${scenario}" \
+		-X POST "${RTC_ENDPOINT}" \
+		-d "${body}" \
+		-w '\n__CURL_TIME__:%{time_namelookup}:%{time_connect}:%{time_appconnect}:%{time_pretransfer}:%{time_starttransfer}:%{time_total}' \
+		-o /tmp/rtctest_last_response.json 2>&1) || true
+	cat /tmp/rtctest_last_response.json
+	# Parse the six timing fields and derive the four useful deltas.
+	local ms connect_ms tls_ms server_ms transfer_ms
+	ms=$(printf '%s' "${timing}" | grep '__CURL_TIME__' | awk -F: '{
+		dns=$2; conn=$3; tls=$4; pre=$5; ttfb=$6; total=$7
+		printf "%.0f", total*1000
+	}')
+	connect_ms=$(printf '%s' "${timing}" | grep '__CURL_TIME__' | awk -F: '{
+		printf "%.0f", ($3-$2)*1000
+	}')
+	tls_ms=$(printf '%s' "${timing}" | grep '__CURL_TIME__' | awk -F: '{
+		printf "%.0f", ($4-$3)*1000
+	}')
+	server_ms=$(printf '%s' "${timing}" | grep '__CURL_TIME__' | awk -F: '{
+		printf "%.0f", ($6-$5)*1000
+	}')
+	transfer_ms=$(printf '%s' "${timing}" | grep '__CURL_TIME__' | awk -F: '{
+		printf "%.0f", ($7-$6)*1000
+	}')
+	printf '\n__CLIENT_MS__:%s\n' "${ms}"
+	printf '__CLIENT_TIMING__:%s:%s:%s:%s\n' "${connect_ms}" "${tls_ms}" "${server_ms}" "${transfer_ms}"
+}
+
+# extract_cursor RESPONSE_JSON
+# Prints the end_cursor value from the first room in the response.
+extract_cursor() {
+	printf '%s' "$1" | grep -o '"end_cursor":[0-9]*' | head -1 | grep -o '[0-9]*' || true
+}
+
+# extract_update_count RESPONSE_JSON
+# Prints the total_updates value from the first room in the response.
+extract_update_count() {
+	printf '%s' "$1" | grep -o '"total_updates":[0-9]*' | head -1 | grep -o '[0-9]*' || true
+}
+
+# extract_should_compact RESPONSE_JSON
+# Prints "true" or "false".
+extract_should_compact() {
+	printf '%s' "$1" | grep -o '"should_compact":\(true\|false\)' | head -1 | grep -o '\(true\|false\)' || true
+}
+
+# extract_client_ms TIMED_RESPONSE
+# Prints total elapsed ms from rtc_post_timed output.
+extract_client_ms() {
+	printf '%s' "$1" | grep '__CLIENT_MS__' | grep -o '[0-9]*$'
+}
+
+# extract_server_ms TIMED_RESPONSE
+# Prints server processing ms (TTFB - pretransfer) from rtc_post_timed output.
+# This is PHP+DB time only, with network and TLS removed.
+extract_server_ms() {
+	printf '%s' "$1" | grep '__CLIENT_TIMING__' | awk -F: '{print $4}'
+}
+
+# extract_connect_ms TIMED_RESPONSE
+# Prints TCP connect ms. Near-zero means loopback; >5ms means real network.
+extract_connect_ms() {
+	printf '%s' "$1" | grep '__CLIENT_TIMING__' | awk -F: '{print $2}'
+}
+
+# extract_tls_ms TIMED_RESPONSE
+# Prints TLS handshake ms (time_appconnect - time_connect).
+extract_tls_ms() {
+	printf '%s' "$1" | grep '__CLIENT_TIMING__' | awk -F: '{print $3}'
+}
+
+# extract_transfer_ms TIMED_RESPONSE
+# Prints response body transfer ms (time_total - time_starttransfer).
+extract_transfer_ms() {
+	printf '%s' "$1" | grep '__CLIENT_TIMING__' | awk -F: '{print $5}'
+}
+
+# extract_status RESPONSE
+# Prints the HTTP status code appended by rtc_post (__HTTP_STATUS__:NNN).
+# Returns empty string if not present (e.g. network error / curl failure).
+extract_status() {
+	printf '%s' "$1" | grep '__HTTP_STATUS__' | grep -o '[0-9]*$'
+}
+
+# count_awareness RESPONSE_JSON
+# Counts how many client awareness entries are in the response.
+# The server returns awareness as {"<client_id>": <state>} -- each state has a
+# "name" field from the client's awareness payload, so we count those.
+count_awareness() {
+	printf '%s' "$1" | grep -o '"name"' | wc -l | tr -d ' ' || true
+}
+
+# check_rtc_response RESPONSE_JSON CONTEXT
+# Prints a diagnostic and returns 1 if the response is not a valid RTC reply.
+check_rtc_response() {
+	local resp="$1"
+	local ctx="${2:-}"
+	if printf '%s' "${resp}" | grep -q '"end_cursor"'; then
+		return 0
+	fi
+	printf 'ERROR%s: RTC endpoint did not return a valid response.\n' \
+		"${ctx:+ (${ctx})}"
+	printf 'Raw response: %s\n' "${resp}" | head -3
+	printf '\nPossible causes:\n'
+	printf '  1. Gutenberg RTC feature not enabled (check: wp option get wp_collaboration_enabled)\n'
+	printf '  2. The /wp-sync/v1/updates endpoint does not exist on this install\n'
+	printf '  3. Authentication failed (check WP_USER and WP_PASS in rtc-test.env)\n'
+	printf '     If you copied rtc-test.env from another host, run: bash rtc-test.sh refresh-auth\n'
+	printf '  4. POST_ID=%s may not exist or user lacks edit permission\n' "${POST_ID}"
+	return 1
+}
+
+# build_room_json CLIENT_ID AWARENESS_JSON CURSOR UPDATES_JSON
+build_room_json() {
+	local cid="$1"
+	local awareness="$2"
+	local cursor="$3"
+	local updates="$4"
+	printf '{"room":"%s","client_id":%s,"awareness":%s,"after":%s,"updates":[%s]}' \
+		"${ROOM}" "${cid}" "${awareness}" "${cursor}" "${updates}"
+}
+
+# build_rooms_json ROOM_JSON [ROOM_JSON ...]
+build_rooms_json() {
+	local rooms=""
+	for r in "$@"; do
+		[ -n "${rooms}" ] && rooms="${rooms},"
+		rooms="${rooms}${r}"
+	done
+	printf '{"rooms":[%s]}' "${rooms}"
+}
+
+# build_update_json TYPE DATA
+build_update_json() {
+	printf '{"type":"%s","data":"%s"}' "$1" "$2"
+}
+
+# print_header LABEL
+print_header() {
+	printf '\n=== %s ===\n' "$1"
+}
+
+# -------------------------------------------------------------------------
+# WP-CLI helpers (used only by setup and teardown)
+# -------------------------------------------------------------------------
+
+# find_wp_root
+# Walks up from $PWD, then checks common paths, for wp-config.php.
+# Prints the path on success; prints nothing if not found.
+find_wp_root() {
+	local dir
+	dir="$(pwd)"
+	while [ "${dir}" != "/" ]; do
+		[ -f "${dir}/wp-config.php" ] && { printf '%s' "${dir}"; return; }
+		dir="$(dirname "${dir}")"
+	done
+	for loc in /var/www/html /var/www/wordpress /srv/www/wordpress /app /webroot /public_html; do
+		[ -f "${loc}/wp-config.php" ] && { printf '%s' "${loc}"; return; }
+	done
+}
+
+# -------------------------------------------------------------------------
+# Commands
+# -------------------------------------------------------------------------
+
+cmd_setup() {
+	print_header "setup"
+	if command -v wp >/dev/null 2>&1; then
+		setup_wpcli
+	else
+		setup_manual
+	fi
+}
+
+setup_wpcli() {
+	printf 'WP-CLI found. Auto-configuring...\n\n'
+
+	# Build the base flags (no --path yet).
+	local wp_path="${WP_PATH:-$(find_wp_root)}"
+	local WP_FLAGS=()
+	[ "$(id -u)" = "0" ] && WP_FLAGS+=( "--allow-root" )
+
+	# Test without --path first: WP-CLI frequently works from the current
+	# directory via wp-cli.yml or wp-config.php detection, and adding --path
+	# explicitly can break setups that already have a working configuration.
+	if wp "${WP_FLAGS[@]}" core version >/dev/null 2>&1; then
+		printf 'WordPress root: %s (via WP-CLI default)\n' "${wp_path:-"$(pwd)"}"
+	elif [ -n "${wp_path}" ] && wp "${WP_FLAGS[@]}" --path="${wp_path}" core version >/dev/null 2>&1; then
+		WP_FLAGS+=( "--path=${wp_path}" )
+		printf 'WordPress root: %s\n' "${wp_path}"
+	else
+		printf 'WP-CLI cannot reach WordPress.\n'
+		printf 'Set WP_PATH=/path/to/wordpress and retry, or follow manual instructions:\n\n'
+		setup_manual
+		return
+	fi
+
+	# Pull the authoritative site URL from the database, then add it to flags
+	# so multisite / subdomain installs resolve correctly.
+	local site_url
+	site_url="$(wp "${WP_FLAGS[@]}" option get siteurl 2>/dev/null)" || site_url="${WP_URL}"
+	WP_FLAGS+=( "--url=${site_url}" )
+
+	# Verify the URL is reachable before writing it to config. HTTP 200 or 401
+	# both confirm the REST API is present; anything else (including curl error 7
+	# for "connection refused") means test requests will fail.
+	local http_code
+	http_code="$(curl --silent --max-time 5 -o /dev/null -w '%{http_code}' \
+		"${site_url}/wp-json/" 2>/dev/null)" || http_code="000"
+	case "${http_code}" in
+		200|401)
+			printf 'Site URL:       %s  (reachable, HTTP %s)\n' "${site_url}" "${http_code}" ;;
+		*)
+			printf 'Site URL:       %s\n' "${site_url}"
+			printf 'WARNING: %s/wp-json/ returned HTTP %s.\n' "${site_url}" "${http_code}"
+			printf 'Test requests will likely fail. Check that this URL is reachable\n'
+			printf 'from the host running this script.\n' ;;
+	esac
+
+	# Always use the dedicated rtctest user so setup controls the password.
+	# We generate the password here and either create or reset the account.
+	local rtctest_wp_pass
+	rtctest_wp_pass="$(openssl rand -hex 16 2>/dev/null)" \
+		|| rtctest_wp_pass="RtcTest$(date +%s)"
+
+	if wp "${WP_FLAGS[@]}" user get rtctest --fields=ID --format=csv >/dev/null 2>&1; then
+		# rtctest already exists -- reset password so we have a known credential.
+		wp "${WP_FLAGS[@]}" user update rtctest --user_pass="${rtctest_wp_pass}" \
+			>/dev/null 2>&1 || die "Failed to reset rtctest password."
+		printf 'User:           rtctest (password reset)\n'
+	else
+		printf 'Creating dedicated "rtctest" user (editor role)...\n'
+		wp "${WP_FLAGS[@]}" user create rtctest rtctest@example.com \
+			--role=editor \
+			--user_pass="${rtctest_wp_pass}" \
+			--porcelain >/dev/null \
+			|| die "Failed to create rtctest user."
+		printf 'User:           rtctest (created)\n'
+	fi
+	WP_USER="rtctest"
+
+	# Fetch numeric ID -- wp post create --post_author requires an ID, not a login.
+	local user_id
+	user_id="$(wp "${WP_FLAGS[@]}" user get rtctest --field=ID 2>/dev/null)"
+
+	# Log in via wp-login.php to obtain a session cookie.
+	local jar="${SCRIPT_DIR}/rtc-test-cookies.txt"
+	rm -f "${jar}"
+	printf 'Logging in...\n'
+	do_login "rtctest" "${rtctest_wp_pass}" "${site_url}" "${jar}" \
+		|| die "Cookie login failed. Check site URL and that rtctest@example.com is reachable."
+	printf 'Cookies:        obtained (%s)\n' "${jar}"
+
+	# Get the wp_rest nonce via the rtctest_nonce AJAX handler in the monitor plugin.
+	printf 'Fetching nonce...\n'
+	local nonce
+	nonce=$(do_get_nonce "${site_url}" "${jar}")
+	[ -n "${nonce}" ] || die "Empty nonce. Is rtc-test.php deployed and active?"
+	printf 'Nonce:          obtained (%s...)\n' "${nonce:0:8}"
+
+	# Create a dedicated test post so test traffic is isolated from real content.
+	printf 'Creating test post...\n'
+	local post_id
+	post_id="$(wp "${WP_FLAGS[@]}" post create \
+		--post_title="RTC Test Post [rtc-test.sh]" \
+		--post_status=publish \
+		--post_type=post \
+		--post_author="${user_id}" \
+		--porcelain 2>/dev/null)" \
+		|| die "Failed to create test post."
+	printf 'Test post ID:   %s\n' "${post_id}"
+
+	# Enable Real Time Collaboration.
+	if wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1; then
+		printf 'RTC:            enabled\n'
+	else
+		printf 'RTC:            could not update option -- verify in Settings > Writing\n'
+	fi
+
+	# Write rtc-test.env using explicit printf lines so there are no heredoc
+	# variable-expansion surprises and no dependency on quoting rules.
+	local config_file="${SCRIPT_DIR}/rtc-test.env"
+	{
+		printf '# Generated by: bash rtc-test.sh setup -- %s\n' "$(date)"
+		printf '# Run "bash rtc-test.sh teardown" to remove this file and the test post.\n'
+		printf '# Run "bash rtc-test.sh refresh-auth" if the nonce expires (~12h).\n'
+		printf 'WP_URL="%s"\n'         "${site_url}"
+		printf 'WP_USER="rtctest"\n'
+		printf 'WP_PASS="%s"\n'        "${rtctest_wp_pass}"
+		printf 'WP_NONCE="%s"\n'       "${nonce}"
+		printf 'WP_PATH="%s"\n'        "${wp_path}"
+		printf 'POST_ID="%s"\n'        "${post_id}"
+		printf '_RTC_POST_ID_AUTO=1\n'
+	} > "${config_file}"
+
+	printf '\nConfig written to %s\n' "${config_file}"
+	printf '\nNext steps:\n'
+	printf '  bash rtc-test.sh baseline\n'
+	printf '  bash rtc-test.sh single-idle\n'
+	printf '  bash rtc-test.sh report\n'
+	printf '  bash rtc-test.sh teardown   # when done\n'
+}
+
+setup_manual() {
+	printf 'WP-CLI not available. Manual setup steps:\n\n'
+	printf '1. Enable RTC: WP Admin > Settings > Writing > "Enable early access to\n'
+	printf '   real-time collaboration"\n\n'
+	printf '2. Note a post ID for an existing editor-role user you want to test with.\n\n'
+	printf '3. Create %s/rtc-test.env:\n\n' "${SCRIPT_DIR}"
+	printf '     WP_URL="%s"\n'      "${WP_URL}"
+	printf '     WP_USER="<login>"\n'
+	printf '     WP_PASS="<password>"\n'
+	printf '     POST_ID=<post_id>\n\n'
+	printf '4. Then run:\n'
+	printf '     bash rtc-test.sh refresh-auth   # logs in and writes cookie jar + nonce\n\n'
+	printf 'After that, all test commands are available.\n'
+}
+
+cmd_teardown() {
+	print_header "teardown"
+
+	# Re-source config so teardown works even if vars are not in the environment.
+	local config_file="${SCRIPT_DIR}/rtc-test.env"
+	# shellcheck source=/dev/null
+	[ -f "${config_file}" ] && . "${config_file}"
+
+	# Remove cookie jar if present.
+	local jar="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"
+	if [ -f "${jar}" ]; then
+		rm "${jar}"
+		printf 'Removed %s\n' "${jar}"
+	fi
+
+	if command -v wp >/dev/null 2>&1; then
+		local wp_path="${WP_PATH:-$(find_wp_root)}"
+		local WP_FLAGS=()
+		[ "$(id -u)" = "0" ] && WP_FLAGS+=( "--allow-root" )
+		[ -n "${WP_URL:-}" ] && WP_FLAGS+=( "--url=${WP_URL}" )
+		# Only add --path if WP-CLI doesn't already work without it.
+		if ! wp "${WP_FLAGS[@]}" core version >/dev/null 2>&1 && [ -n "${wp_path}" ]; then
+			WP_FLAGS+=( "--path=${wp_path}" )
+		fi
+
+		if [ "${_RTC_POST_ID_AUTO:-0}" = "1" ] && [ -n "${POST_ID:-}" ]; then
+			printf 'Deleting test post %s...\n' "${POST_ID}"
+			wp "${WP_FLAGS[@]}" post delete "${POST_ID}" --force \
+				>/dev/null 2>&1 && printf '  Done.\n' || printf '  Already removed.\n'
+		fi
+	fi
+
+	if [ -f "${config_file}" ]; then
+		rm "${config_file}"
+		printf 'Removed %s\n' "${config_file}"
+	fi
+
+	printf '\nTeardown complete.\n'
+}
+
+cmd_refresh_auth() {
+	print_header "refresh-auth"
+	local config_file="${SCRIPT_DIR}/rtc-test.env"
+	[ -f "${config_file}" ] || die "No rtc-test.env found. Run: bash rtc-test.sh setup"
+	# shellcheck source=/dev/null
+	. "${config_file}"
+	[ -n "${WP_PASS:-}" ]  || die "WP_PASS not set in rtc-test.env."
+	[ -n "${WP_USER:-}" ]  || die "WP_USER not set in rtc-test.env."
+	[ -n "${WP_URL:-}" ]   || die "WP_URL not set in rtc-test.env."
+
+	local jar="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"
+	rm -f "${jar}"
+	printf 'Logging in as %s...\n' "${WP_USER}"
+	do_login "${WP_USER}" "${WP_PASS}" "${WP_URL}" "${jar}" \
+		|| die "Cookie login failed. Check WP_URL and WP_PASS in rtc-test.env."
+	printf 'Cookies:    obtained (%s)\n' "${jar}"
+
+	local nonce
+	nonce=$(do_get_nonce "${WP_URL}" "${jar}")
+	[ -n "${nonce}" ] || die "Empty nonce. Is rtc-test.php deployed and active?"
+	printf 'Nonce:      obtained (%s...)\n' "${nonce:0:8}"
+
+	# Update WP_NONCE in rtc-test.env in-place.
+	# Use a temp file instead of sed -i to avoid BSD/GNU portability issues.
+	local tmp
+	tmp=$(mktemp)
+	sed "s|^WP_NONCE=.*|WP_NONCE=\"${nonce}\"|" "${config_file}" > "${tmp}" \
+		&& mv "${tmp}" "${config_file}"
+	printf 'Updated WP_NONCE in %s\n' "${config_file}"
+	printf '\nAuth refreshed. Restart any long-running test scripts to pick up the new nonce.\n'
+}
+
+cmd_baseline() {
+	print_header "baseline (${POLLS} polls)"
+	# No auth: wp/v2/types is public. Keeping auth out of baseline gives a
+	# cleaner lower bound for WP REST overhead without credential round-trips.
+	# We capture full timing breakdown so server_ms can be used as the
+	# cross-environment baseline instead of total_ms.
+
+	local total_ms=0
+	local total_srv=0
+	local i=1
+	while [ "${i}" -le "${POLLS}" ]; do
+		local raw
+		raw=$(curl --silent --show-error \
+			-o /dev/null \
+			-w '%{time_namelookup}:%{time_connect}:%{time_appconnect}:%{time_pretransfer}:%{time_starttransfer}:%{time_total}' \
+			"${WP_URL}/wp-json/wp/v2/types")
+		local ms connect_ms tls_ms server_ms
+		ms=$(printf '%s' "${raw}" | awk -F: '{printf "%.0f", $6*1000}')
+		connect_ms=$(printf '%s' "${raw}" | awk -F: '{printf "%.0f", ($2-$1)*1000}')
+		tls_ms=$(printf '%s' "${raw}" | awk -F: '{printf "%.0f", ($3-$2)*1000}')
+		server_ms=$(printf '%s' "${raw}" | awk -F: '{printf "%.0f", ($5-$4)*1000}')
+
+		if [ "${i}" -eq 1 ]; then
+			if [ -n "${connect_ms}" ] && [ "${connect_ms}" -lt 2 ] 2>/dev/null; then
+				printf 'Network path: loopback (connect=%sms)\n' "${connect_ms}"
+			else
+				printf 'Network path: real network (connect=%sms, tls=%sms)\n' "${connect_ms}" "${tls_ms}"
+				printf '  server_ms (PHP processing only) is the comparable metric.\n'
+			fi
+		fi
+
+		printf 'poll %2d: total_ms=%s server_ms=%s\n' "${i}" "${ms}" "${server_ms}"
+		total_ms=$((total_ms + ms))
+		total_srv=$((total_srv + server_ms))
+		i=$((i + 1))
+		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+	done
+	printf 'mean: total_ms=%s server_ms=%s\n' "$((total_ms / POLLS))" "$((total_srv / POLLS))"
+	printf '\nNote: baseline requests are NOT tagged with X-RTC-Test.\n'
+	printf 'Run "bash rtc-test.sh report" to see baseline overhead vs RTC scenarios.\n'
+}
+
+cmd_single_idle() {
+	print_header "single-idle (${POLLS} polls, client ${CLIENT_A})"
+	require_auth
+
+	local cursor=0
+	local i=1
+	while [ "${i}" -le "${POLLS}" ]; do
+		local room
+		room=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "${cursor}" "")
+		local body
+		body=$(build_rooms_json "${room}")
+
+		local response
+		response=$(rtc_post_timed "single-idle" "${body}")
+		local resp_json
+		resp_json=$(printf '%s' "${response}" | grep -v '__CLIENT_MS__' | grep -v '__CLIENT_TIMING__' | grep -v '^$' || true)
+		local client_ms server_ms connect_ms tls_ms transfer_ms
+		client_ms=$(extract_client_ms "${response}")
+		server_ms=$(extract_server_ms "${response}")
+		connect_ms=$(extract_connect_ms "${response}")
+		tls_ms=$(extract_tls_ms "${response}")
+		transfer_ms=$(extract_transfer_ms "${response}")
+
+		# On the first poll, show the full timing breakdown and verify the endpoint.
+		if [ "${i}" -eq 1 ]; then
+			printf 'Timing breakdown (ms): connect=%s tls=%s server=%s transfer=%s total=%s\n' \
+				"${connect_ms}" "${tls_ms}" "${server_ms}" "${transfer_ms}" "${client_ms}"
+			if [ -n "${tls_ms}" ] && [ "${tls_ms}" -gt 50 ] 2>/dev/null; then
+				printf '  NOTE: TLS handshake dominates. server_ms is PHP+DB only and is\n'
+				printf '  the correct metric to compare across environments.\n'
+			fi
+			check_rtc_response "${resp_json}" "single-idle" || return 1
+		fi
+
+		local new_cursor
+		new_cursor=$(extract_cursor "${resp_json}")
+		[ -n "${new_cursor}" ] && cursor="${new_cursor}"
+
+		local awareness
+		awareness=$(count_awareness "${resp_json}")
+		local total_updates
+		total_updates=$(extract_update_count "${resp_json}")
+
+		printf 'poll %2d: cursor=%s awareness=%s total_updates=%s total_ms=%s server_ms=%s tls_ms=%s\n' \
+			"${i}" "${cursor}" "${awareness}" "${total_updates}" "${client_ms}" "${server_ms}" "${tls_ms}"
+
+		i=$((i + 1))
+		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+	done
+}
+
+cmd_two_idle() {
+	print_header "two-idle (${POLLS} rounds, clients ${CLIENT_A} and ${CLIENT_B})"
+	require_auth
+
+	local cursor_a=0
+	local cursor_b=0
+	local i=1
+	while [ "${i}" -le "${POLLS}" ]; do
+		# Client A polls.
+		local room_a
+		room_a=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "${cursor_a}" "")
+		local resp_a
+		resp_a=$(rtc_post "two-idle" "$(build_rooms_json "${room_a}")")
+		local new_cursor_a
+		new_cursor_a=$(extract_cursor "${resp_a}")
+		[ -n "${new_cursor_a}" ] && cursor_a="${new_cursor_a}"
+		local awareness_a
+		awareness_a=$(count_awareness "${resp_a}" "${CLIENT_A}")
+
+		# Client B polls.
+		local room_b
+		room_b=$(build_room_json "${CLIENT_B}" "${AWARENESS_B}" "${cursor_b}" "")
+		local resp_b
+		resp_b=$(rtc_post "two-idle" "$(build_rooms_json "${room_b}")")
+		local new_cursor_b
+		new_cursor_b=$(extract_cursor "${resp_b}")
+		[ -n "${new_cursor_b}" ] && cursor_b="${new_cursor_b}"
+		local awareness_b
+		awareness_b=$(count_awareness "${resp_b}" "${CLIENT_B}")
+
+		# awareness_a >= 2 means B is visible to A (A sees itself + B).
+		# awareness_b >= 2 means A is visible to B.
+		local a_sees_b="no"
+		local b_sees_a="no"
+		[ "${awareness_a}" -ge 2 ] && a_sees_b="yes"
+		[ "${awareness_b}" -ge 2 ] && b_sees_a="yes"
+
+		printf 'round %2d: A(cursor=%s aware=%s sees_B=%s) B(cursor=%s aware=%s sees_A=%s)\n' \
+			"${i}" "${cursor_a}" "${awareness_a}" "${a_sees_b}" \
+			"${cursor_b}" "${awareness_b}" "${b_sees_a}"
+
+		i=$((i + 1))
+		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+	done
+}
+
+cmd_two_editing() {
+	print_header "two-editing (sync handshake, update_size=${UPDATE_SIZE})"
+	require_auth
+
+	# Step 1: Client A announces itself with sync_step1.
+	printf 'Step 1: Client A sends sync_step1\n'
+	local step1_update
+	step1_update=$(build_update_json "sync_step1" "${SYNC_STEP1_DATA}")
+	local room_a_s1
+	room_a_s1=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "0" "${step1_update}")
+	local resp_a_s1
+	resp_a_s1=$(rtc_post "two-editing" "$(build_rooms_json "${room_a_s1}")")
+	local cursor_a
+	cursor_a=$(extract_cursor "${resp_a_s1}")
+	[ -z "${cursor_a}" ] && cursor_a=0
+	printf '  -> cursor_a=%s\n' "${cursor_a}"
+
+	# Step 2: Client B polls, receives sync_step1; responds with sync_step2 + update.
+	printf 'Step 2: Client B polls (should receive sync_step1), then sends sync_step2 + update\n'
+	local step2_update
+	step2_update=$(build_update_json "sync_step2" "${SYNC_STEP2_DATA}")
+	local edit_update
+	edit_update=$(build_update_json "update" "${UPDATE_DATA}")
+	local room_b_s2
+	room_b_s2=$(build_room_json "${CLIENT_B}" "${AWARENESS_B}" "0" "${step2_update},${edit_update}")
+	local resp_b_s2
+	resp_b_s2=$(rtc_post "two-editing" "$(build_rooms_json "${room_b_s2}")")
+	local cursor_b
+	cursor_b=$(extract_cursor "${resp_b_s2}")
+	[ -z "${cursor_b}" ] && cursor_b=0
+
+	# Check B received sync_step1 from A.
+	local b_received_step1
+	b_received_step1=$(printf '%s' "${resp_b_s2}" | grep -c '"type":"sync_step1"' || true)
+	printf '  -> B received sync_step1 from A: %s | cursor_b=%s\n' \
+		"$([ "${b_received_step1}" -gt 0 ] && echo yes || echo no)" "${cursor_b}"
+
+	# Step 3: Client A polls to receive sync_step2 and update from B.
+	printf 'Step 3: Client A polls (should receive sync_step2 + update from B)\n'
+	local room_a_s3
+	room_a_s3=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "${cursor_a}" "")
+	local resp_a_s3
+	resp_a_s3=$(rtc_post "two-editing" "$(build_rooms_json "${room_a_s3}")")
+	local new_cursor_a
+	new_cursor_a=$(extract_cursor "${resp_a_s3}")
+	[ -n "${new_cursor_a}" ] && cursor_a="${new_cursor_a}"
+
+	local a_received_step2
+	a_received_step2=$(printf '%s' "${resp_a_s3}" | grep -c '"type":"sync_step2"' || true)
+	local a_received_update
+	a_received_update=$(printf '%s' "${resp_a_s3}" | grep -c '"type":"update"' || true)
+	local total_updates
+	total_updates=$(extract_update_count "${resp_a_s3}")
+
+	printf '  -> A received sync_step2: %s | update: %s | cursor_a=%s | total_updates=%s\n' \
+		"$([ "${a_received_step2}" -gt 0 ] && echo yes || echo no)" \
+		"$([ "${a_received_update}" -gt 0 ] && echo yes || echo no)" \
+		"${cursor_a}" "${total_updates}"
+
+	printf '\nHandshake complete.\n'
+}
+
+cmd_one_idle_one_editing() {
+	print_header "one-idle-one-editing (${POLLS} rounds, update_size=${UPDATE_SIZE})"
+	require_auth
+	printf 'Client A=%s (editor), Client B=%s (idle viewer)\n' "${CLIENT_A}" "${CLIENT_B}"
+
+	local cursor_a=0
+	local cursor_b=0
+	local i=1
+	while [ "${i}" -le "${POLLS}" ]; do
+		# Client A sends one update per round.
+		local edit_update
+		edit_update=$(build_update_json "update" "${UPDATE_DATA}")
+		local room_a
+		room_a=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "${cursor_a}" "${edit_update}")
+		local resp_a
+		resp_a=$(rtc_post_timed "one-idle-one-editing" "$(build_rooms_json "${room_a}")")
+		local resp_a_json
+		resp_a_json=$(printf '%s' "${resp_a}" | grep -v '__CLIENT_MS__' | grep -v '__CLIENT_TIMING__' | grep -v '^$')
+		local ms_a server_ms_a
+		ms_a=$(extract_client_ms "${resp_a}")
+		server_ms_a=$(extract_server_ms "${resp_a}")
+		local new_cursor_a
+		new_cursor_a=$(extract_cursor "${resp_a_json}")
+		[ -n "${new_cursor_a}" ] && cursor_a="${new_cursor_a}"
+		local total_a
+		total_a=$(extract_update_count "${resp_a_json}")
+		local compact_a
+		compact_a=$(extract_should_compact "${resp_a_json}")
+
+		# Client B polls, no updates.
+		local room_b
+		room_b=$(build_room_json "${CLIENT_B}" "${AWARENESS_B}" "${cursor_b}" "")
+		local resp_b
+		resp_b=$(rtc_post_timed "one-idle-one-editing" "$(build_rooms_json "${room_b}")")
+		local resp_b_json
+		resp_b_json=$(printf '%s' "${resp_b}" | grep -v '__CLIENT_MS__' | grep -v '__CLIENT_TIMING__' | grep -v '^$')
+		local ms_b server_ms_b
+		ms_b=$(extract_client_ms "${resp_b}")
+		server_ms_b=$(extract_server_ms "${resp_b}")
+		local new_cursor_b
+		new_cursor_b=$(extract_cursor "${resp_b_json}")
+		[ -n "${new_cursor_b}" ] && cursor_b="${new_cursor_b}"
+		# How many updates did the idle client receive this round?
+		local updates_delivered
+		updates_delivered=$(printf '%s' "${resp_b_json}" | grep -o '"type"' | wc -l | tr -d ' ')
+
+		printf 'round %2d: editor(total_ms=%s srv=%s cursor=%s total=%s compact=%s) idle(total_ms=%s srv=%s cursor=%s delivered=%s)\n' \
+			"${i}" "${ms_a}" "${server_ms_a}" "${cursor_a}" "${total_a}" "${compact_a:-false}" \
+			"${ms_b}" "${server_ms_b}" "${cursor_b}" "${updates_delivered}"
+
+		i=$((i + 1))
+		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+	done
+}
+
+cmd_n_idle() {
+	print_header "n-idle (${N_CLIENTS} clients, ${POLLS} rounds each)"
+	require_auth
+	printf 'Client IDs: %s..%s\n' "${CLIENT_A}" "$((CLIENT_A + N_CLIENTS - 1))"
+
+	# Initialize cursors array (bash 3-compatible: use indexed array).
+	local cursors=()
+	local client_ids=()
+	local j=0
+	while [ "${j}" -lt "${N_CLIENTS}" ]; do
+		cursors+=( 0 )
+		client_ids+=( $((CLIENT_A + j)) )
+		j=$((j + 1))
+	done
+
+	# Awareness payloads per client (deterministic colors from index).
+	local round=1
+	while [ "${round}" -le "${POLLS}" ]; do
+		printf 'round %2d:' "${round}"
+		local k=0
+		while [ "${k}" -lt "${N_CLIENTS}" ]; do
+			local cid="${client_ids[$k]}"
+			local cursor="${cursors[$k]}"
+			local awareness
+			# Generate a distinct name for each client.
+			awareness="{\"name\":\"RTC-Test-Client-${cid}\",\"color\":\"#$(printf '%06x' $((cid * 31337 % 16777216)))\"}"
+			local room
+			room=$(build_room_json "${cid}" "${awareness}" "${cursor}" "")
+			local resp
+			resp=$(rtc_post "n-idle" "$(build_rooms_json "${room}")")
+			local new_cursor
+			new_cursor=$(extract_cursor "${resp}")
+			[ -n "${new_cursor}" ] && cursors[$k]="${new_cursor}"
+			local awareness_count
+			awareness_count=$(count_awareness "${resp}" "${cid}")
+			printf ' C%s(aware=%s)' "${cid}" "${awareness_count}"
+			k=$((k + 1))
+		done
+		printf '\n'
+		round=$((round + 1))
+		[ "${round}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+	done
+}
+
+cmd_compaction_trigger() {
+	print_header "compaction-trigger (threshold=50 updates)"
+	require_auth
+
+	local cursor_a=0
+	local total=0
+	local compact_triggered=false
+	local poll=0
+
+	printf 'Sending updates until should_compact=true (compaction threshold is 50)...\n'
+
+	while [ "${compact_triggered}" = "false" ] && [ "${poll}" -lt 80 ]; do
+		local edit_update
+		edit_update=$(build_update_json "update" "${UPDATE_DATA}")
+		local room_a
+		room_a=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "${cursor_a}" "${edit_update}")
+		local resp
+		resp=$(rtc_post "compaction-trigger" "$(build_rooms_json "${room_a}")")
+		local new_cursor
+		new_cursor=$(extract_cursor "${resp}")
+		[ -n "${new_cursor}" ] && cursor_a="${new_cursor}"
+		total=$(extract_update_count "${resp}")
+		local compact
+		compact=$(extract_should_compact "${resp}")
+		poll=$((poll + 1))
+
+		printf '  update %2d: total_updates=%s cursor=%s should_compact=%s\n' \
+			"${poll}" "${total}" "${cursor_a}" "${compact:-false}"
+
+		if [ "${compact}" = "true" ]; then
+			compact_triggered=true
+		fi
+	done
+
+	if [ "${compact_triggered}" = "false" ]; then
+		printf 'should_compact never fired after %d polls. Check that CLIENT_A=%s is the\n' "${poll}" "${CLIENT_A}"
+		printf 'lowest client_id in the room (only the lowest ID is asked to compact).\n'
+		return
+	fi
+
+	printf '\nshould_compact triggered at total_updates=%s. Sending compaction update...\n' "${total}"
+
+	# Client A sends a compaction update (replaces updates before cursor_a).
+	local compact_update
+	compact_update=$(build_update_json "compaction" "${UPDATE_DATA}")
+	local room_a_compact
+	room_a_compact=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "${cursor_a}" "${compact_update}")
+	local resp_compact
+	resp_compact=$(rtc_post "compaction-trigger" "$(build_rooms_json "${room_a_compact}")")
+	local cursor_after_compact
+	cursor_after_compact=$(extract_cursor "${resp_compact}")
+	[ -n "${cursor_after_compact}" ] && cursor_a="${cursor_after_compact}"
+
+	printf 'Compaction sent. cursor_a=%s\n' "${cursor_a}"
+
+	# Client B polls to verify it receives the compaction update.
+	printf '\nClient B polls to verify compaction delivery...\n'
+	local room_b
+	room_b=$(build_room_json "${CLIENT_B}" "${AWARENESS_B}" "0" "")
+	local resp_b
+	resp_b=$(rtc_post "compaction-trigger" "$(build_rooms_json "${room_b}")")
+	local total_after
+	total_after=$(extract_update_count "${resp_b}")
+	local cursor_b
+	cursor_b=$(extract_cursor "${resp_b}")
+	local b_got_compact
+	b_got_compact=$(printf '%s' "${resp_b}" | grep -c '"type":"compaction"' || true)
+
+	printf 'Client B: received_compaction=%s total_updates_now=%s cursor_b=%s\n' \
+		"$([ "${b_got_compact}" -gt 0 ] && echo yes || echo no)" \
+		"${total_after}" "${cursor_b}"
+
+	if [ "${total_after}" -lt "${total}" ]; then
+		printf '\nCompaction confirmed: total_updates dropped from %s to %s.\n' "${total}" "${total_after}"
+	else
+		printf '\nNote: total_updates did not drop (%s -> %s).\n' "${total}" "${total_after}"
+		printf 'This is expected if other clients added updates between compaction and this poll.\n'
+	fi
+}
+
+cmd_concurrent() {
+	print_header "concurrent (${N_CLIENTS} simultaneous clients, ${POLLS} rounds)"
+	require_auth
+	printf 'Client IDs: %s..%s\n' "${CLIENT_A}" "$((CLIENT_A + N_CLIENTS - 1))"
+	printf 'All clients fire at the same second each round (rendezvous-synced burst).\n\n'
+
+	# Per-client cursors, updated from responses each round.
+	local cursors=()
+	local k=0
+	while [ "${k}" -lt "${N_CLIENTS}" ]; do
+		cursors+=( 0 )
+		k=$(( k + 1 ))
+	done
+
+	local round=1
+	while [ "${round}" -le "${POLLS}" ]; do
+		# Rendezvous: all workers spin-wait until 2 seconds from now so requests
+		# fire within the same second rather than staggered by process spawn time.
+		local start_at
+		start_at=$(( $(date +%s) + 2 ))
+		local tmpdir
+		tmpdir="$(mktemp -d /tmp/rtctest.XXXXXX)"
+
+		# Spawn one background worker per client.
+		k=0
+		while [ "${k}" -lt "${N_CLIENTS}" ]; do
+			local cid=$(( CLIENT_A + k ))
+			local cursor="${cursors[$k]}"
+			local awareness
+			awareness="{\"name\":\"RTC-Concurrent-${cid}\",\"color\":\"#$(printf '%06x' $((cid * 31337 % 16777216)))\"}"
+			local room body
+			room=$(build_room_json "${cid}" "${awareness}" "${cursor}" "")
+			body=$(build_rooms_json "${room}")
+			local out="${tmpdir}/${k}"
+			local sa="${start_at}"
+
+			(
+				# Busy-wait until the rendezvous second.
+				while [ "$(date +%s)" -lt "${sa}" ]; do :; done
+				curl "${BASE_CURL_OPTS[@]}" \
+					-H "X-RTC-Scenario: concurrent" \
+					-X POST "${RTC_ENDPOINT}" \
+					-d "${body}" \
+					-w '\n__HTTP_STATUS__:%{http_code}' \
+					2>/dev/null
+			) > "${out}" &
+
+			k=$(( k + 1 ))
+		done
+
+		# Wait for all background workers to finish.
+		wait 2>/dev/null || true
+
+		# Collect results and update cursors for next round.
+		printf 'round %2d:' "${round}"
+		k=0
+		while [ "${k}" -lt "${N_CLIENTS}" ]; do
+			local out="${tmpdir}/${k}"
+			local new_cursor awareness_count status c
+			new_cursor="${cursors[$k]}"
+			awareness_count=0
+			status=""
+			c=""
+			if [ -f "${out}" ]; then
+				local resp
+				resp="$(cat "${out}")" || true
+				c="$(extract_cursor "${resp}")"
+				status="$(extract_status "${resp}")"
+				[ -n "${c}" ] && new_cursor="${c}"
+				awareness_count="$(count_awareness "${resp}")"
+				awareness_count="${awareness_count:-0}"
+			fi
+			cursors[$k]="${new_cursor}"
+			if [ -n "${c}" ]; then
+				printf ' C%s(aware=%s cursor=%s)' "$((CLIENT_A + k))" "${awareness_count}" "${new_cursor}"
+			else
+				printf ' C%s(ERR:%s)' "$((CLIENT_A + k))" "${status:-net}"
+			fi
+			k=$(( k + 1 ))
+		done
+		printf '\n'
+
+		rm -rf "${tmpdir}"
+
+		round=$(( round + 1 ))
+		[ "${round}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+	done
+	printf '\nRun: bash rtc-test.sh report\n'
+	printf 'The "conc" column shows max simultaneous workers seen by the plugin.\n'
+}
+
+cmd_sustain() {
+	print_header "sustain (${N_CLIENTS} clients, ${DURATION}s, poll interval ${POLL_DELAY}s)"
+	require_auth
+	printf 'Client IDs: %s..%s\n' "${CLIENT_A}" "$(( CLIENT_A + N_CLIENTS - 1 ))"
+	printf 'Each client polls independently (no synchronization).\n'
+	printf 'POLL_DELAY=0 keeps clients always in-flight (stress); POLL_DELAY=1 is realistic cadence.\n\n'
+
+	local end_at tmpdir
+	end_at=$(( $(date +%s) + DURATION ))
+	tmpdir=$(mktemp -d /tmp/rtctest.XXXXXX)
+
+	# Start one independent polling loop per client.
+	# Uses rtc_post (not rtc_post_timed) -- no shared temp file, safe for parallel use.
+	local k=0
+	while [ "${k}" -lt "${N_CLIENTS}" ]; do
+		local cid=$(( CLIENT_A + k ))
+		local out="${tmpdir}/${k}"
+		local ea="${end_at}"
+		(
+			local cursor=0 polls=0 err_429=0 err_5xx=0 err_net=0
+			local awareness room body resp new_cursor status
+			awareness="{\"name\":\"Sustain-${cid}\",\"color\":\"#$(printf '%06x' $(( cid * 31337 % 16777216 )))\"}"
+			while [ "$(date +%s)" -lt "${ea}" ]; do
+				room=$(build_room_json "${cid}" "${awareness}" "${cursor}" "")
+				body=$(build_rooms_json "${room}")
+				resp=$(rtc_post "sustain" "${body}") || true
+				new_cursor=$(extract_cursor "${resp}")
+				if [ -n "${new_cursor}" ]; then
+					cursor="${new_cursor}"
+					polls=$(( polls + 1 ))
+				else
+					status=$(extract_status "${resp}")
+					case "${status}" in
+						429)            err_429=$(( err_429 + 1 )) ;;
+						5[0-9][0-9])    err_5xx=$(( err_5xx + 1 )) ;;
+						*)              err_net=$(( err_net + 1 )) ;;
+					esac
+				fi
+				# Sleep between polls only if time remains and delay is non-zero.
+				if [ "${POLL_DELAY}" -gt 0 ] && [ "$(date +%s)" -lt "${ea}" ]; then
+					sleep "${POLL_DELAY}"
+				fi
+			done
+			printf '%d %d %d %d %d\n' "${cid}" "${polls}" "${err_429}" "${err_5xx}" "${err_net}" > "${out}"
+		) &
+		k=$(( k + 1 ))
+	done
+
+	# Progress ticker while waiting (prints every 5s so the terminal isn't silent).
+	(
+		local elapsed=0
+		while [ "${elapsed}" -lt "${DURATION}" ]; do
+			sleep 5
+			elapsed=$(( elapsed + 5 ))
+			[ "${elapsed}" -lt "${DURATION}" ] && \
+				printf '  %ds / %ds elapsed...\n' "${elapsed}" "${DURATION}"
+		done
+	) &
+	local ticker_pid=$!
+
+	wait 2>/dev/null || true
+	kill "${ticker_pid}" 2>/dev/null || true
+	wait "${ticker_pid}" 2>/dev/null || true
+
+	printf '\nResults:\n'
+	local total_polls=0 total_429=0 total_5xx=0 total_net=0
+	k=0
+	while [ "${k}" -lt "${N_CLIENTS}" ]; do
+		local out="${tmpdir}/${k}"
+		local r_cid r_polls r_429 r_5xx r_net
+		r_cid=$(( CLIENT_A + k ))
+		r_polls=0; r_429=0; r_5xx=0; r_net=0
+		if [ -f "${out}" ]; then
+			read -r r_cid r_polls r_429 r_5xx r_net < "${out}" || true
+		fi
+		local r_total_err=$(( r_429 + r_5xx + r_net ))
+		if [ "${r_total_err}" -gt 0 ]; then
+			printf '  client %d: %d polls, %d errors (429=%d 5xx=%d net=%d)\n' \
+				"${r_cid}" "${r_polls}" "${r_total_err}" "${r_429}" "${r_5xx}" "${r_net}"
+		else
+			printf '  client %d: %d polls, 0 errors\n' "${r_cid}" "${r_polls}"
+		fi
+		total_polls=$(( total_polls + r_polls ))
+		total_429=$(( total_429 + r_429 ))
+		total_5xx=$(( total_5xx + r_5xx ))
+		total_net=$(( total_net + r_net ))
+		k=$(( k + 1 ))
+	done
+	local total_errors=$(( total_429 + total_5xx + total_net ))
+	if [ "${total_errors}" -gt 0 ]; then
+		printf 'Total: %d polls, %d errors (429=%d 5xx=%d net=%d) in %ds\n' \
+			"${total_polls}" "${total_errors}" "${total_429}" "${total_5xx}" "${total_net}" "${DURATION}"
+	else
+		printf 'Total: %d polls, 0 errors in %ds\n' "${total_polls}" "${DURATION}"
+	fi
+
+	rm -rf "${tmpdir}"
+	printf '\nRun: bash rtc-test.sh report\n'
+	printf 'Key columns: tot_cpu_ms (full request CPU), conc (max simultaneous workers).\n'
+}
+
+cmd_report() {
+	print_header "report"
+	require_auth
+
+	# Fetch environment fingerprint.
+	printf 'Environment:\n'
+	local env
+	env=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_ENV_URL}" 2>/dev/null) || true
+	if [ -n "${env}" ]; then
+		# The REST API returns compact single-line JSON. Split on commas first so
+		# each key:value pair lands on its own line, then strip braces and quotes.
+		printf '%s' "${env}" | tr ',' '\n' | awk '
+		{
+			gsub(/[{}"]/, "")
+			if (match($0, /php_version:/))           printf "  PHP:              %s\n", substr($0, RSTART+12)
+			if (match($0, /wp_version:/))            printf "  WordPress:        %s\n", substr($0, RSTART+11)
+			if (match($0, /db_version:/))            printf "  DB:               %s\n", substr($0, RSTART+11)
+			if (match($0, /gutenberg_version:/))     printf "  Gutenberg:        %s\n", substr($0, RSTART+18)
+			if (match($0, /gutenberg_active:/))      printf "  Gutenberg active: %s\n", substr($0, RSTART+17)
+			if (match($0, /ext_object_cache:/))      printf "  Ext object cache: %s\n", substr($0, RSTART+17)
+			if (match($0, /savequeries:/))           printf "  SAVEQUERIES:      %s\n", substr($0, RSTART+12)
+			if (match($0, /compaction_threshold:/))  printf "  Compact at:       %s updates\n", substr($0, RSTART+21)
+			if (match($0, /awareness_timeout_s:/))   printf "  Awareness TTL:    %s s\n", substr($0, RSTART+20)
+			if (match($0, /storage_backend:/))       printf "  Storage:          %s\n", substr($0, RSTART+16)
+			if (match($0, /storage_post_type:/))     printf "  Storage post type:%s\n", substr($0, RSTART+18)
+		}
+		'
+	else
+		printf '  (could not reach rtc-test/v1/env -- is the plugin active?)\n'
+	fi
+
+	# Fetch log.
+	printf '\nFetching log from %s ...\n' "${PLUGIN_LOG_URL}"
+	local log
+	log=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
+
+	if [ -z "${log}" ] || [ "${log}" = "[]" ]; then
+		printf 'No log entries found.\n'
+		return
+	fi
+
+	# A WordPress error response is a JSON object (starts with '{'), not an array.
+	# This happens when the user lacks permission or the plugin is not active.
+	case "${log}" in
+		'{'*)
+			printf 'ERROR: log endpoint returned an error, not log data:\n'
+			printf '  %s\n' "${log}"
+			printf '\nPossible causes:\n'
+			printf '  1. Plugin not active: copy rtc-test.php to wp-content/mu-plugins/\n'
+			printf '  2. User lacks edit_posts capability\n'
+			return 1
+			;;
+	esac
+
+	# Parse log with awk: compute per-scenario stats.
+	# Each JSON entry is on one line; we extract fields with pattern matching.
+	# Uses only POSIX/mawk-compatible awk (no gawk 3-arg match or gensub).
+	printf '\nPer-scenario summary:\n'
+	printf '%s' "${log}" | awk '
+	# extract_str: pull a quoted-string value for "key":"value" fields.
+	function extract_str(s, key,    pat, val) {
+		pat = "\"" key "\":\""
+		if (!match(s, pat "[^\"]+\"")) return "unknown"
+		val = substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
+		return val
+	}
+	# extract_num: pull a numeric value for "key":number fields.
+	function extract_num(s, key,    pat) {
+		pat = "\"" key "\":[0-9.]+"
+		if (!match(s, pat)) return 0
+		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
+	}
+	{
+		# We process the full log as one line, splitting on "},{" boundaries.
+		n = split($0, entries, /\},\{/)
+		for (i = 1; i <= n; i++) {
+			e = entries[i]
+			scenario = extract_str(e, "scenario")
+			ms            = extract_num(e, "ms")
+			total_ms      = extract_num(e, "total_ms")
+			cpu_ms        = extract_num(e, "cpu_ms")
+			total_cpu_ms  = extract_num(e, "total_cpu_ms")
+			dbq  = extract_num(e, "db_queries")
+			dbt  = extract_num(e, "db_time_ms")
+			peak = extract_num(e, "peak_memory")
+			ui   = extract_num(e, "updates_in")
+			uo   = extract_num(e, "updates_out")
+			sc   = (match(e, /"should_compact":true/) ? 1 : 0)
+			conc = extract_num(e, "concurrent")
+
+			count[scenario]++
+			ms_sum[scenario]           += ms
+			ms_sq[scenario]            += ms * ms
+			total_ms_sum[scenario]     += total_ms
+			cpu_ms_sum[scenario]       += cpu_ms
+			total_cpu_ms_sum[scenario] += total_cpu_ms
+			dbq_sum[scenario]      += dbq
+			dbt_sum[scenario]      += dbt
+			peak_sum[scenario]     += peak
+			ui_sum[scenario]       += ui
+			uo_sum[scenario]       += uo
+			sc_sum[scenario]       += sc
+			if (conc > max_conc[scenario]) max_conc[scenario] = conc
+		}
+	}
+	END {
+		# Print header.
+		# disp_ms       = rest_pre..post (endpoint logic only)
+		# total_ms      = REQUEST_TIME_FLOAT..post (full worker occupancy incl. WP bootstrap + auth)
+		# cpu_ms        = getrusage() delta across dispatch only
+		# total_cpu_ms  = getrusage() delta from MU-plugin load to post_dispatch (full request CPU)
+		# mem_mb        = mean PHP peak memory for the request (MB)
+		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
+			"Scenario", "n", "disp_ms", "total_ms", "cpu_ms", "tot_cpu_ms", "sd_disp", "db_q", "db_t_ms", "mem_mb", "ui_tot", "uo_tot", "sc", "conc"
+		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
+			"", "", "avg", "avg", "avg", "avg", "stddev", "avg", "avg", "avg", "sum", "sum", "sum", "max"
+		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
+			"----------------------", "------", "--------", "--------",
+			"--------", "-----------", "--------", "--------", "--------", "------", "------", "------", "----", "----"
+
+		# Compute baseline mean for ratio column.
+		baseline_mean = 0
+		if ("baseline" in count && count["baseline"] > 0)
+			baseline_mean = ms_sum["baseline"] / count["baseline"]
+
+		for (s in count) {
+			n    = count[s]
+			mean = ms_sum[s] / n
+			var  = (ms_sq[s] / n) - (mean * mean)
+			if (var < 0) var = 0
+			std  = sqrt(var)
+			printf "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6.1f %6d %6d %5d %5d\n",
+				s, n, mean, total_ms_sum[s] / n, cpu_ms_sum[s] / n,
+				total_cpu_ms_sum[s] / n, std,
+				dbq_sum[s] / n,
+				dbt_sum[s] / n,
+				peak_sum[s] / n / 1048576,
+				ui_sum[s], uo_sum[s],
+				sc_sum[s],
+				max_conc[s]
+		}
+
+		if (baseline_mean > 0) {
+			printf "\nRatio to baseline (disp_ms / baseline_disp_ms = %.1f):\n", baseline_mean
+			for (s in count) {
+				if (s == "baseline") continue
+				mean = ms_sum[s] / count[s]
+				printf "  %-22s %.2fx\n", s, mean / baseline_mean
+			}
+		}
+	}
+	'
+}
+
+cmd_clear() {
+	print_header "clear"
+	require_auth
+	local result
+	result=$(curl "${BASE_CURL_OPTS[@]}" -X DELETE "${PLUGIN_LOG_URL}") || die "curl failed"
+	printf 'Result: %s\n' "${result}"
+}
+
+cmd_reset() {
+	print_header "reset"
+	require_auth
+	printf 'Dropping log table on server (will be recreated automatically on next tagged request)...\n'
+	local result
+	result=$(curl "${BASE_CURL_OPTS[@]}" -X DELETE "${PLUGIN_TABLE_URL}") || die "curl failed"
+	printf 'Result: %s\n' "${result}"
+}
+
+# -------------------------------------------------------------------------
+# Capture commands
+# -------------------------------------------------------------------------
+
+# seed -- populate POST_ID with 5 lorem ipsum Gutenberg paragraphs via REST.
+# No WP-CLI required; uses PUT /wp/v2/posts/${POST_ID}.
+# Double-quoted bash strings preserve \n as literal backslash-n, which is
+# exactly what JSON requires for embedded newlines.
+cmd_seed() {
+	print_header "seed (post ${POST_ID})"
+	require_auth
+
+	local content
+	content="<!-- wp:paragraph -->\n<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>Aenean fermentum elit eget tincidunt condimentum. Eros ipsum rutrum orci sagittis tempus lacus enim ac dui. Donec non enim in turpis pulvinar facilisis. Ut felis. Praesent dapibus neque id cursus faucibus.</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>Nam dui mi tincidunt quis accumsan porttitor facilisis luctus metus. Phasellus ultrices nulla quis nibh. Quisque a lectus. Donec consectetuer ligula vulputate sem tristique cursus. Nam nulla quam gravida non commodo.</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>Nullam eu ante vel est convallis dignissim. Fusce suscipit wisi nec facilisis facilisis est dui fermentum leo quis tempor ligula erat quis odio. Nunc porta vulputate tellus. Nunc rutrum turpis sed pede.</p>\n<!-- /wp:paragraph -->"
+
+	local result
+	result=$(curl "${BASE_CURL_OPTS[@]}" \
+		-X PUT \
+		"${WP_URL}/wp-json/wp/v2/posts/${POST_ID}" \
+		-d "{\"content\":\"${content}\"}") || die "curl failed"
+
+	if printf '%s' "${result}" | grep -q '"id"'; then
+		printf 'Post %s seeded with 5 lorem ipsum paragraphs.\n' "${POST_ID}"
+		printf 'Editor URL: %s/wp-admin/post.php?post=%s&action=edit\n' "${WP_URL}" "${POST_ID}"
+	else
+		printf 'ERROR: Unexpected response:\n'
+		printf '%s\n' "${result}" | head -5
+		return 1
+	fi
+}
+
+# capture-start SESSION_ID -- begin recording /wp-sync/ traffic for POST_ID.
+cmd_capture_start() {
+	local session_id="${1:-}"
+	[ -z "${session_id}" ] && die "Usage: bash rtc-test.sh capture-start <session-id>"
+
+	print_header "capture-start (${session_id})"
+	require_auth
+
+	local result
+	result=$(curl "${BASE_CURL_OPTS[@]}" \
+		-X POST "${CAPTURE_SESSION_URL}/start" \
+		-d "{\"session_id\":\"${session_id}\",\"room_filter\":\"postType/post:${POST_ID}\"}") \
+		|| die "curl failed"
+
+	printf 'Result: %s\n' "${result}"
+	printf '\nOpen two browser windows and edit the post:\n'
+	printf '  %s/wp-admin/post.php?post=%s&action=edit\n' "${WP_URL}" "${POST_ID}"
+	printf '\nWhen done: bash rtc-test.sh capture-stop\n'
+}
+
+# capture-stop -- stop the active session and print frame count.
+cmd_capture_stop() {
+	print_header "capture-stop"
+	require_auth
+
+	local result
+	result=$(curl "${BASE_CURL_OPTS[@]}" \
+		-X POST "${CAPTURE_SESSION_URL}/stop") || die "curl failed"
+
+	printf 'Result: %s\n' "${result}"
+
+	local frames
+	frames=$(printf '%s' "${result}" | grep -o '"frames":[0-9]*' | grep -o '[0-9]*' || true)
+	local sid
+	sid=$(printf '%s' "${result}" | grep -o '"session_id":"[^"]*"' | grep -o '"[^"]*"$' | tr -d '"' || true)
+
+	if [ -n "${frames}" ]; then
+		printf '\nCaptured %s frames for session "%s".\n' "${frames}" "${sid}"
+		printf 'Export: bash rtc-test.sh capture-export %s\n' "${sid}"
+	fi
+}
+
+# capture-list -- print all captured sessions.
+cmd_capture_list() {
+	print_header "capture-list"
+	require_auth
+
+	local result
+	result=$(curl "${BASE_CURL_OPTS[@]}" "${CAPTURE_SESSIONS_URL}") || die "curl failed"
+
+	if [ -z "${result}" ] || [ "${result}" = "[]" ]; then
+		printf 'No sessions captured.\n'
+		return
+	fi
+
+	printf '%s' "${result}" | awk '
+	function extract_str(s, key,    pat) {
+		pat = "\"" key "\":\""
+		if (!match(s, pat "[^\"]+\"")) return ""
+		return substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
+	}
+	function extract_num(s, key,    pat) {
+		pat = "\"" key "\":[0-9]+"
+		if (!match(s, pat)) return 0
+		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
+	}
+	{
+		n = split($0, entries, /\},\{/)
+		printf "%-30s %7s %13s %11s %s\n", "session_id", "frames", "started(UTC)", "duration_ms", "active"
+		printf "%-30s %7s %13s %11s %s\n", "------------------------------", "-------", "-------------", "-----------", "------"
+		for (i = 1; i <= n; i++) {
+			e = entries[i]
+			sid      = extract_str(e, "session_id")
+			frames   = extract_num(e, "frames")
+			first_us = extract_num(e, "first_us")
+			dur_ms   = extract_num(e, "duration_ms")
+			active   = (match(e, /"active":true/) ? "yes" : "")
+			if (first_us > 0) {
+				s = int(first_us / 1000000)
+				started = sprintf("%02d:%02d:%02d", int(s%86400/3600), int(s%3600/60), s%60)
+			} else { started = "-" }
+			printf "%-30s %7d %13s %11d %s\n", sid, frames, started, dur_ms, active
+		}
+	}
+	'
+}
+
+# capture-export SESSION_ID -- fetch session JSON to stdout (pipe to file).
+cmd_capture_export() {
+	local session_id="${1:-}"
+	[ -z "${session_id}" ] && die "Usage: bash rtc-test.sh capture-export <session-id>"
+
+	require_auth
+	curl "${BASE_CURL_OPTS[@]}" "${CAPTURE_SESSION_URL}/${session_id}" || die "curl failed"
+}
+
+# capture-drop [SESSION_ID] -- delete a session or the entire table.
+# With no argument, prompts before dropping all.
+cmd_capture_drop() {
+	local session_id="${1:-}"
+	require_auth
+
+	if [ -n "${session_id}" ]; then
+		print_header "capture-drop (${session_id})"
+		local result
+		result=$(curl "${BASE_CURL_OPTS[@]}" \
+			-X DELETE "${CAPTURE_SESSION_URL}/${session_id}") || die "curl failed"
+		printf 'Result: %s\n' "${result}"
+	else
+		print_header "capture-drop (all)"
+		printf 'Drop the entire capture table? [y/N] '
+		read -r confirm
+		if [ "${confirm}" = "y" ] || [ "${confirm}" = "Y" ]; then
+			local result
+			result=$(curl "${BASE_CURL_OPTS[@]}" \
+				-X DELETE "${CAPTURE_SESSIONS_URL}") || die "curl failed"
+			printf 'Result: %s\n' "${result}"
+		else
+			printf 'Cancelled.\n'
+		fi
+	fi
+}
+
+# -------------------------------------------------------------------------
+# Replay command
+# -------------------------------------------------------------------------
+
+# capture-sanitize FIXTURE_FILE -- strip site-specific and personal data from a raw
+# capture-export fixture, producing a portable file safe to share or bundle.
+#
+# What is removed:
+#   response bodies       -- contain site-specific cursors; unused by replay
+#   non-post rooms        -- root/comment, taxonomy/*, postType/wp_block; ignored by replay
+#   awareness payloads    -- may contain user display names from the browser session
+#   captured after cursor -- site-specific; replay always uses live cursors
+#
+# What is kept:
+#   elapsed_ms            -- inter-frame timing for realistic replay speed
+#   client_id             -- distinguishes which tab each frame came from
+#   updates               -- the actual Yjs binary delta payloads (the core data)
+#
+# Room is normalized to postType/post:0 (replay substitutes the live POST_ID anyway).
+#
+# Output goes to stdout so the original is never modified:
+#   bash rtc-test.sh capture-sanitize raw.json > sanitized.json
+cmd_capture_sanitize() {
+	local fixture_file="${1:-}"
+	[ -z "${fixture_file}" ] && die "Usage: bash rtc-test.sh capture-sanitize <fixture.json>"
+	[ -f "${fixture_file}" ] || die "File not found: ${fixture_file}"
+	command -v python3 >/dev/null 2>&1 || die "capture-sanitize requires python3"
+
+	python3 -c '
+import json, sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+frames_in  = data.get("frames", [])
+frames_out = []
+for frame in frames_in:
+    rooms = frame.get("request", {}).get("rooms", [])
+    post_room = None
+    for r in rooms:
+        if r.get("room", "").startswith("postType/post:"):
+            post_room = r
+            break
+    if post_room is None:
+        continue
+    frames_out.append({
+        "n":          frame.get("n", len(frames_out) + 1),
+        "elapsed_ms": frame.get("elapsed_ms", 0),
+        "client_id":  frame.get("client_id", 0),
+        "request": {
+            "rooms": [{
+                "room":      "postType/post:0",
+                "client_id": post_room.get("client_id", frame.get("client_id", 0)),
+                "awareness": {},
+                "after":     0,
+                "updates":   post_room.get("updates", [])
+            }]
+        }
+    })
+
+out = {
+    "session_id":  data.get("session_id", ""),
+    "frame_count": len(frames_out),
+    "frames":      frames_out,
+}
+json.dump(out, sys.stdout, separators=(",", ":"))
+sys.stdout.write("\n")
+' "${fixture_file}"
+}
+
+# replay FIXTURE_FILE -- replay a captured session JSON against the current RTC endpoint.
+# The fixture is the JSON output from: bash rtc-test.sh capture-export <id> > file.json
+#
+# Each frame's postType/post:* room updates are sent with a fresh live cursor.
+# Captured "after" cursor values are NOT replayed -- they reference a different server
+# state; live cursors from each response are used instead.
+#
+# Env vars:
+#   REPLAY_SPEED   Time compression: 1=real-time, 2=2x, 0=instant/no-delay (default: 1)
+#   REPLAY_CLIENT  Override client_id for all frames (default: use captured client_id)
+cmd_replay() {
+	local fixture_file="${1:-}"
+	[ -z "${fixture_file}" ] && die "Usage: bash rtc-test.sh replay <fixture.json>"
+	[ -f "${fixture_file}" ] || die "File not found: ${fixture_file}"
+	command -v python3 >/dev/null 2>&1 || die "replay requires python3 to parse fixture JSON"
+
+	local speed="${REPLAY_SPEED:-1}"
+	print_header "replay ($(basename "${fixture_file}"), speed=${speed}x)"
+	require_auth
+
+	# Extract per-frame update payloads from the fixture using python3 -c (no temp file).
+	# Output format (one line per frame): elapsed_ms <TAB> client_id <TAB> updates_json
+	# updates_json is comma-separated {type,data} objects; empty string if no updates.
+	# Only the postType/post:* room is extracted; other rooms (root/comment etc.) skipped.
+	# sys.stdout.flush() after each line prevents Python pipe-buffering from stalling bash.
+	local _py_extractor
+	_py_extractor='
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+except Exception as e:
+    sys.stderr.write("replay: " + str(e) + "\n")
+    sys.exit(1)
+for frame in data.get("frames", []):
+    elapsed_ms = int(frame.get("elapsed_ms", 0))
+    client_id  = frame.get("client_id", 0)
+    rooms      = frame.get("request", {}).get("rooms", [])
+    for r in rooms:
+        if r.get("room", "").startswith("postType/post:"):
+            updates     = r.get("updates", [])
+            updates_str = ",".join(json.dumps(u, separators=(",",":")) for u in updates)
+            sys.stdout.write("{}\t{}\t{}\n".format(elapsed_ms, client_id, updates_str))
+            sys.stdout.flush()
+            break
+'
+
+	local cursor=0
+	local prev_elapsed=0
+	local frame_num=0
+	local frame_elapsed frame_client frame_updates
+
+	printf 'Parsing fixture and starting replay...\n'
+
+	while IFS=$'\t' read -r frame_elapsed frame_client frame_updates; do
+		frame_num=$(( frame_num + 1 ))
+
+		# Timing: sleep proportional to inter-frame elapsed delta at the requested speed.
+		# Skipped on the first frame and when REPLAY_SPEED=0 (instant/stress mode).
+		if [ "${frame_num}" -gt 1 ] && [ "${speed}" != "0" ]; then
+			local delta_ms=$(( frame_elapsed - prev_elapsed ))
+			if [ "${delta_ms}" -gt 0 ]; then
+				local sleep_s
+				sleep_s=$(awk "BEGIN{printf \"%.3f\", ${delta_ms} / (${speed} * 1000)}")
+				sleep "${sleep_s}" 2>/dev/null || true
+			fi
+		fi
+		prev_elapsed="${frame_elapsed}"
+
+		# Use captured client_id unless REPLAY_CLIENT is set.
+		local cid="${REPLAY_CLIENT:-${frame_client}}"
+		local awareness
+		awareness="{\"name\":\"RTC-Replay\",\"color\":\"#cc6600\"}"
+
+		local room body resp new_cursor
+		room=$(build_room_json "${cid}" "${awareness}" "${cursor}" "${frame_updates}")
+		body=$(build_rooms_json "${room}")
+		resp=$(rtc_post "replay" "${body}") || true
+		new_cursor=$(extract_cursor "${resp}")
+		[ -n "${new_cursor}" ] && cursor="${new_cursor}"
+
+		local total_updates compact ui_count uo_count
+		total_updates=$(extract_update_count "${resp}")
+		compact=$(extract_should_compact "${resp}")
+		ui_count=0
+		[ -n "${frame_updates}" ] && \
+			ui_count=$(printf '%s' "${frame_updates}" | grep -o '"type"' | wc -l | tr -d ' ' || true)
+		uo_count=$(printf '%s' "${resp}" | grep -o '"type"' | wc -l | tr -d ' ' || true)
+
+		printf 'frame %3d: t=%5dms ui=%d uo=%s cursor=%s total=%s compact=%s\n' \
+			"${frame_num}" "${frame_elapsed}" "${ui_count}" "${uo_count}" \
+			"${cursor}" "${total_updates:-0}" "${compact:-false}"
+
+	done < <(python3 -c "${_py_extractor}" "${fixture_file}")
+
+	if [ "${frame_num}" -eq 0 ]; then
+		printf 'ERROR: no frames extracted. Check fixture format (expected capture-export JSON).\n' >&2
+		return 1
+	fi
+
+	printf '\nReplay complete: %d frames sent.\n' "${frame_num}"
+	printf 'Run: bash rtc-test.sh report\n'
+}
+
+# -------------------------------------------------------------------------
+# Dispatch
+# -------------------------------------------------------------------------
+
+COMMAND="${1:-}"
+
+case "${COMMAND}" in
+	setup)                  cmd_setup ;;
+	teardown)               cmd_teardown ;;
+	refresh-auth)           cmd_refresh_auth ;;
+	baseline)               cmd_baseline ;;
+	single-idle)            cmd_single_idle ;;
+	two-idle)               cmd_two_idle ;;
+	two-editing)            cmd_two_editing ;;
+	one-idle-one-editing)   cmd_one_idle_one_editing ;;
+	n-idle)                 cmd_n_idle ;;
+	compaction-trigger)     cmd_compaction_trigger ;;
+	concurrent)             cmd_concurrent ;;
+	sustain)                cmd_sustain ;;
+	report)                 cmd_report ;;
+	clear)                  cmd_clear ;;
+	reset)                  cmd_reset ;;
+	seed)                   cmd_seed ;;
+	capture-start)          cmd_capture_start "${2:-}" ;;
+	capture-stop)           cmd_capture_stop ;;
+	capture-list)           cmd_capture_list ;;
+	capture-export)         cmd_capture_export "${2:-}" ;;
+	capture-sanitize)       cmd_capture_sanitize "${2:-}" ;;
+	capture-drop)           cmd_capture_drop "${2:-}" ;;
+	replay)                 cmd_replay "${2:-}" ;;
+	*)
+		printf 'Usage: %s <command>\n\n' "$0"
+		printf 'Commands:\n'
+		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
+		printf '  teardown              Delete test post, remove cookie jar and rtc-test.env\n'
+		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
+		printf '  baseline              Measure ambient WP REST overhead (run first)\n'
+		printf '  single-idle           1 client, POLLS polls, no updates\n'
+		printf '  two-idle              2 clients alternating, awareness propagation\n'
+		printf '  two-editing           2 clients: sync handshake + update (1 pass)\n'
+		printf '  one-idle-one-editing  1 editor sends updates, 1 idle client watches\n'
+		printf '  n-idle                N_CLIENTS clients round-robin, awareness only\n'
+		printf '  compaction-trigger    Send updates until compaction fires, then compact\n'
+		printf '  concurrent            N_CLIENTS burst simultaneously, POLLS rounds (rendezvous-synced)\n'
+		printf '  sustain               N_CLIENTS independent pollers for DURATION seconds\n'
+		printf '  report                Fetch log from plugin and print summary table\n'
+		printf '  clear                 Delete all log entries (table stays, schema intact)\n'
+		printf '  reset                 Drop the log table entirely (recreated on next tagged request)\n'
+		printf '\nCapture commands (require rtc-capture.php in mu-plugins):\n'
+		printf '  seed                  Populate POST_ID with 5 lorem ipsum Gutenberg paragraphs\n'
+		printf '  capture-start <id>    Start recording /wp-sync/ traffic for POST_ID\n'
+		printf '  capture-stop          Stop recording, print frame count\n'
+		printf '  capture-list          List all captured sessions\n'
+		printf '  capture-export <id>   Print session JSON to stdout (pipe to file)\n'
+		printf '  capture-sanitize <f>  Strip responses/awareness from a fixture; print to stdout\n'
+		printf '  capture-drop [<id>]   Delete a session (or entire table if no ID given)\n'
+		printf '  replay <fixture.json> Replay a captured session JSON against the endpoint\n'
+		printf '\nEnvironment variables (or set in rtc-test.env after running setup):\n'
+		printf '  WP_URL        WordPress site URL (default: http://localhost)\n'
+		printf '  WP_USER       WordPress username (set by setup to "rtctest")\n'
+		printf '  WP_PASS       WordPress login password (set by setup, used by refresh-auth)\n'
+		printf '  WP_COOKIE_JAR Path to cookie jar file (set by setup)\n'
+		printf '  WP_NONCE      WP REST API nonce (~12h TTL; refresh with refresh-auth)\n'
+		printf '  WP_PATH       Path to WordPress root for WP-CLI (auto-detected by setup)\n'
+		printf '  POST_ID       Post ID with edit permission (default: 1)\n'
+		printf '  POLLS         Polls per scenario (default: 10)\n'
+		printf '  POLL_DELAY    Seconds between polls per client (default: 1; 0=stress/immediate re-poll)\n'
+		printf '  N_CLIENTS     Clients for n-idle/concurrent/sustain (default: 3)\n'
+		printf '  DURATION      Seconds to run for sustain (default: 30)\n'
+		printf '  UPDATE_SIZE   small|medium|large payload (default: small)\n'
+		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
+		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'
+		exit 1
+		;;
+esac
