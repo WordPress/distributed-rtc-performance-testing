@@ -97,6 +97,7 @@ POLL_DELAY="${POLL_DELAY:-1}"   # Seconds between polls per client (0 = immediat
 N_CLIENTS="${N_CLIENTS:-3}"
 DURATION="${DURATION:-30}"      # Seconds to run for sustain command
 UPDATE_SIZE="${UPDATE_SIZE:-small}"
+APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
 
 # -------------------------------------------------------------------------
 # Deterministic test constants
@@ -150,6 +151,7 @@ BASE_CURL_OPTS=(
 	-H "X-RTC-Test: 1"
 	-H "Content-Type: application/json"
 )
+[ -n "${APPROACH}" ] && BASE_CURL_OPTS+=( -H "X-RTC-Approach: ${APPROACH}" )
 
 RTC_ENDPOINT="${WP_URL}/wp-json/wp-sync/v1/updates"
 PLUGIN_LOG_URL="${WP_URL}/wp-json/rtc-test/v1/log"
@@ -1821,6 +1823,7 @@ case "${COMMAND}" in
 		printf '  N_CLIENTS     Clients for n-idle/concurrent/sustain (default: 3)\n'
 		printf '  DURATION      Seconds to run for sustain (default: 30)\n'
 		printf '  UPDATE_SIZE   small|medium|large payload (default: small)\n'
+		printf '  APPROACH      Storage approach label written to the log (e.g. post-meta, custom-table)\n'
 		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
 		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'
 		exit 1

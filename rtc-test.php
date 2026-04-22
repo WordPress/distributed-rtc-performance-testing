@@ -30,10 +30,11 @@ unset( $_rtctest_ru );
 
 define( 'RTC_TEST_ENV_OPTION',        'rtc_test_env' );
 define( 'RTC_TEST_CONCURRENT_OPTION', 'rtc_test_concurrent' );
-define( 'RTC_TEST_DB_VERSION',        '1' );
+define( 'RTC_TEST_DB_VERSION',        '2' );
 define( 'RTC_TEST_LOG_MAX',           500 );
 define( 'RTC_TEST_REQUEST_HEADER',    'HTTP_X_RTC_TEST' );
 define( 'RTC_TEST_SCENARIO_HEADER',   'HTTP_X_RTC_SCENARIO' );
+define( 'RTC_TEST_APPROACH_HEADER',   'HTTP_X_RTC_APPROACH' );
 
 // -------------------------------------------------------------------------
 // Monitor: table helpers
@@ -56,6 +57,7 @@ function rtctest_ensure_table() {
 	$sql = "CREATE TABLE IF NOT EXISTS {$table} (
   id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   ts int(11) NOT NULL DEFAULT 0,
+  approach varchar(60) NOT NULL DEFAULT '',
   scenario varchar(100) NOT NULL DEFAULT 'unknown',
   ms float NOT NULL DEFAULT 0,
   total_ms float NOT NULL DEFAULT 0,
@@ -75,7 +77,7 @@ function rtctest_ensure_table() {
   total_updates int(11) NOT NULL DEFAULT 0,
   concurrent int(11) NOT NULL DEFAULT 0,
   PRIMARY KEY  (id),
-  KEY scenario (scenario),
+  KEY approach_scenario (approach,scenario),
   KEY ts (ts)
 ) {$charset_collate};";
 
@@ -156,6 +158,10 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_SCENARIO_HEADER ] ) )
 		: 'unknown';
 
+	$approach = isset( $_SERVER[ RTC_TEST_APPROACH_HEADER ] )
+		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_APPROACH_HEADER ] ) )
+		: '';
+
 	$data      = $response->get_data();
 	$rooms_in  = $request->get_param( 'rooms' ) ?? array();
 	$rooms_out = isset( $data['rooms'] ) && is_array( $data['rooms'] ) ? $data['rooms'] : array();
@@ -182,6 +188,7 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 		rtctest_log_table(),
 		array(
 			'ts'              => time(),
+			'approach'        => $approach,
 			'scenario'        => $scenario,
 			'ms'              => $wall_ms,
 			'total_ms'        => $total_ms,
@@ -202,7 +209,7 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 			'concurrent'      => $GLOBALS['rtctest_concurrent_at_start'],
 		),
 		array(
-			'%d', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
+			'%d', '%s', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
 			'%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d',
 		)
 	);
@@ -294,6 +301,7 @@ function rtctest_register_routes() {
 					foreach ( $rows as &$row ) {
 						$row['id']              = (int) $row['id'];
 						$row['ts']              = (int) $row['ts'];
+						$row['approach']        = (string) $row['approach'];
 						$row['ms']              = (float) $row['ms'];
 						$row['total_ms']        = (float) $row['total_ms'];
 						$row['cpu_ms']          = (float) $row['cpu_ms'];
@@ -575,6 +583,7 @@ function rtctest_admin_page() {
 			<thead>
 				<tr>
 					<th>Time</th>
+					<th>Approach</th>
 					<th>Scenario</th>
 					<th>disp_ms</th>
 					<th>total_ms</th>
@@ -598,6 +607,7 @@ function rtctest_admin_page() {
 			<?php foreach ( $recent as $entry ) : ?>
 				<tr>
 					<td><?php echo esc_html( gmdate( 'H:i:s', (int) $entry['ts'] ) ); ?></td>
+					<td><?php echo esc_html( $entry['approach'] ); ?></td>
 					<td><?php echo esc_html( $entry['scenario'] ); ?></td>
 					<td><?php echo esc_html( $entry['ms'] ); ?></td>
 					<td><?php echo esc_html( $entry['total_ms'] ); ?></td>
