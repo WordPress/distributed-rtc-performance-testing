@@ -90,6 +90,7 @@ WP_PASS="${WP_PASS:-}"                                            # WP login pas
 WP_COOKIE_JAR="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"  # cookie jar path (set by setup)
 WP_NONCE="${WP_NONCE:-}"                                          # wp_rest nonce (set by setup, ~12h TTL)
 WP_PATH="${WP_PATH:-}"       # Absolute path to WordPress root; required by setup
+REQUIRED_WP_VERSION="${REQUIRED_WP_VERSION:-7.0-RC2}"   # WordPress version required by these tests
 POST_ID="${POST_ID:-1}"
 POLLS="${POLLS:-10}"
 POLL_DELAY="${POLL_DELAY:-1}"   # Seconds between polls per client (0 = immediate re-poll / stress mode)
@@ -366,6 +367,56 @@ print_header() {
 }
 
 # -------------------------------------------------------------------------
+# WordPress version enforcement
+# -------------------------------------------------------------------------
+
+# ensure_wp_version -- verify the installed WordPress version matches
+# REQUIRED_WP_VERSION; download and install it via WP-CLI if not.
+# Pass all WP-CLI flags as arguments (e.g. --path=... --allow-root --url=...).
+ensure_wp_version() {
+	local current
+	current="$(wp "$@" core version 2>/dev/null)" \
+		|| { printf 'ERROR: Could not read WordPress version via WP-CLI.\n'; return 1; }
+
+	if [ "${current}" = "${REQUIRED_WP_VERSION}" ]; then
+		printf 'WordPress:      %s (matches required version)\n' "${current}"
+		return 0
+	fi
+
+	printf 'WordPress:      %s installed, %s required. Updating...\n' \
+		"${current}" "${REQUIRED_WP_VERSION}"
+
+	wp "$@" core update --version="${REQUIRED_WP_VERSION}" --force \
+		|| { printf 'ERROR: WP core update to %s failed.\n' "${REQUIRED_WP_VERSION}"; return 1; }
+
+	wp "$@" core update-db \
+		|| printf 'WARNING: Database update step failed or was not needed.\n'
+
+	local updated
+	updated="$(wp "$@" core version 2>/dev/null)"
+	if [ "${updated}" = "${REQUIRED_WP_VERSION}" ]; then
+		printf 'WordPress:      updated to %s\n' "${updated}"
+	else
+		printf 'ERROR: Version after update is %s, expected %s.\n' \
+			"${updated}" "${REQUIRED_WP_VERSION}"
+		return 1
+	fi
+}
+
+cmd_ensure_wp_version() {
+	print_header "ensure-wp-version"
+	command -v wp >/dev/null 2>&1 || die "WP-CLI is required for ensure-wp-version."
+	[ -n "${WP_PATH:-}" ] || die "WP_PATH is not set. Add it to your .env file."
+
+	local WP_FLAGS=()
+	[ "$(id -u)" = "0" ] && WP_FLAGS+=( "--allow-root" )
+	WP_FLAGS+=( "--path=${WP_PATH}" )
+	[ -n "${WP_URL:-}" ] && WP_FLAGS+=( "--url=${WP_URL}" )
+
+	ensure_wp_version "${WP_FLAGS[@]}"
+}
+
+# -------------------------------------------------------------------------
 # Commands
 # -------------------------------------------------------------------------
 
@@ -424,6 +475,9 @@ setup_wpcli() {
 			printf 'Test requests will likely fail. Check that this URL is reachable\n'
 			printf 'from the host running this script.\n' ;;
 	esac
+
+	# Ensure the required WordPress version is installed before proceeding.
+	ensure_wp_version "${WP_FLAGS[@]}" || die "WordPress version requirement not met. Aborting setup."
 
 	# Copy the MU-plugin now, before login/nonce steps that depend on it being active.
 	local wp_content_dir mu_plugins_dir
@@ -1702,6 +1756,7 @@ COMMAND="${1:-}"
 
 case "${COMMAND}" in
 	setup)                  cmd_setup ;;
+	ensure-wp-version)      cmd_ensure_wp_version ;;
 	teardown)               cmd_teardown ;;
 	refresh-auth)           cmd_refresh_auth ;;
 	baseline)               cmd_baseline ;;
@@ -1728,6 +1783,7 @@ case "${COMMAND}" in
 		printf 'Usage: %s <command>\n\n' "$0"
 		printf 'Commands:\n'
 		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
+		printf '  ensure-wp-version     Verify WordPress %s is installed; update via WP-CLI if not\n' "${REQUIRED_WP_VERSION}"
 		printf '  teardown              Delete test post, remove cookie jar, strip generated .env section\n'
 		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
 		printf '  baseline              Measure ambient WP REST overhead (run first)\n'
@@ -1757,7 +1813,8 @@ case "${COMMAND}" in
 		printf '  WP_PASS       WordPress login password (set by setup, used by refresh-auth)\n'
 		printf '  WP_COOKIE_JAR Path to cookie jar file (set by setup)\n'
 		printf '  WP_NONCE      WP REST API nonce (~12h TTL; refresh with refresh-auth)\n'
-		printf '  WP_PATH       Absolute path to WordPress root; required by setup\n'
+		printf '  WP_PATH                Absolute path to WordPress root; required by setup\n'
+		printf '  REQUIRED_WP_VERSION    WordPress version to enforce (default: %s)\n' "${REQUIRED_WP_VERSION}"
 		printf '  POST_ID       Post ID with edit permission (default: 1)\n'
 		printf '  POLLS         Polls per scenario (default: 10)\n'
 		printf '  POLL_DELAY    Seconds between polls per client (default: 1; 0=stress/immediate re-poll)\n'
