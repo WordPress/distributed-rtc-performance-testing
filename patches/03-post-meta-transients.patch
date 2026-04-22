@@ -1,0 +1,475 @@
+diff --git a/src/wp-includes/class-wp-query.php b/src/wp-includes/class-wp-query.php
+index cf07b07d977c3..fa337981d31bc 100644
+--- a/src/wp-includes/class-wp-query.php
++++ b/src/wp-includes/class-wp-query.php
+@@ -2473,6 +2473,20 @@ public function get_posts() {
+ 			$clauses = $this->meta_query->get_sql( 'post', $wpdb->posts, 'ID', $this );
+ 			$join   .= $clauses['join'];
+ 			$where  .= $clauses['where'];
++
++			/*
++			 * Determine if meta queries require just-in-time cache invalidation.
++			 *
++			 * If the most recent modification of post meta (addition, update or deletion) was of a meta key
++			 * that uses jit cache invalidation, then the meta query cache will be considered stale and the
++			 * post-query cache group flushed by changing the posts' last changed time.
++			 *
++			 * The cache is considered up to date if the `wp_query_meta_query_updated` cache key in the `post_meta`
++			 * group returns `true`, otherwise the cache will be considered stale.
++			 */
++			if ( ! wp_cache_get( 'wp_query_meta_query_updated', 'post_meta' ) ) {
++				wp_cache_set_posts_last_changed();
++			}
+ 		}
+ 
+ 		$rand = ( isset( $query_vars['orderby'] ) && 'rand' === $query_vars['orderby'] );
+diff --git a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
+index 88554a48c7d54..c02dd9af67c30 100644
+--- a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
++++ b/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
+@@ -355,12 +355,33 @@ private function process_awareness_update( string $room, int $client_id, ?array
+ 			$updated_awareness[] = $entry;
+ 		}
+ 
++		/**
++		 * Filters granularity used for rounding up a client's awareness timestamp.
++		 *
++		 * Modifies the granularity used when recording the latest time a client updates their
++		 * awareness state. This allows implementations to increase or reduce the granularity
++		 * of awareness updates for the desired balance of real-time updates and server load.
++		 *
++		 * The default database granularity of 10 seconds limits the number of writes to the
++		 * database as WordPress only makes the database call if the transient has changed.
++		 * Increasing the granularity by lowering this number will increase the number of
++		 * database writes.
++		 *
++		 * @since 7.0.0
++		 *
++		 * @param int $granularity Granularity in seconds. Default 10.
++		 */
++		$granularity = absint( apply_filters( 'wp_sync_awareness_timestamp_granularity', 10 ) );
++		if ( 0 === $granularity ) {
++			$granularity = 1;
++		}
++
+ 		// Add this client's awareness state.
+ 		if ( null !== $awareness_update ) {
+ 			$updated_awareness[] = array(
+ 				'client_id'  => $client_id,
+ 				'state'      => $awareness_update,
+-				'updated_at' => $current_time,
++				'updated_at' => ceil( $current_time / $granularity ) * $granularity, // Round up to nearest granularity to reduce database churn.
+ 				'wp_user_id' => get_current_user_id(),
+ 			);
+ 		}
+diff --git a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+index 658a9b65539dd..32d9b3afa8028 100644
+--- a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
++++ b/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+@@ -30,7 +30,7 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
+ 	 * @since 7.0.0
+ 	 * @var string
+ 	 */
+-	const AWARENESS_META_KEY = 'wp_sync_awareness_state';
++	const AWARENESS_TRANSIENT_PREFIX = 'wp_sync_awareness';
+ 
+ 	/**
+ 	 * Meta key for sync updates.
+@@ -69,32 +69,19 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
+ 	 *
+ 	 * @since 7.0.0
+ 	 *
+-	 * @global wpdb $wpdb WordPress database abstraction object.
+-	 *
+ 	 * @param string $room   Room identifier.
+ 	 * @param mixed  $update Sync update.
+ 	 * @return bool True on success, false on failure.
+ 	 */
+ 	public function add_update( string $room, $update ): bool {
+-		global $wpdb;
+-
+ 		$post_id = $this->get_storage_post_id( $room );
+ 		if ( null === $post_id ) {
+ 			return false;
+ 		}
+ 
+-		// Use direct database operation to avoid cache invalidation performed by
+-		// post meta functions (`wp_cache_set_posts_last_changed()` and direct
+-		// `wp_cache_delete()` calls).
+-		return (bool) $wpdb->insert(
+-			$wpdb->postmeta,
+-			array(
+-				'post_id'    => $post_id,
+-				'meta_key'   => self::SYNC_UPDATE_META_KEY,
+-				'meta_value' => wp_json_encode( $update ),
+-			),
+-			array( '%d', '%s', '%s' )
+-		);
++		$meta_id = add_post_meta( $post_id, wp_slash( self::SYNC_UPDATE_META_KEY ), wp_slash( $update ), false );
++
++		return (bool) $meta_id;
+ 	}
+ 
+ 	/**
+@@ -102,40 +89,19 @@ public function add_update( string $room, $update ): bool {
+ 	 *
+ 	 * @since 7.0.0
+ 	 *
+-	 * @global wpdb $wpdb WordPress database abstraction object.
+-	 *
+ 	 * @param string $room Room identifier.
+ 	 * @return array<int, mixed> Awareness state.
+ 	 */
+ 	public function get_awareness_state( string $room ): array {
+-		global $wpdb;
+-
+-		$post_id = $this->get_storage_post_id( $room );
+-		if ( null === $post_id ) {
+-			return array();
+-		}
+-
+-		// Use direct database operation to avoid updating the post meta cache.
+-		// ORDER BY meta_id DESC ensures the latest row wins if duplicates exist
+-		// from a past race condition in set_awareness_state().
+-		$meta_value = $wpdb->get_var(
+-			$wpdb->prepare(
+-				"SELECT meta_value FROM $wpdb->postmeta WHERE post_id = %d AND meta_key = %s ORDER BY meta_id DESC LIMIT 1",
+-				$post_id,
+-				self::AWARENESS_META_KEY
+-			)
+-		);
+-
+-		if ( null === $meta_value ) {
+-			return array();
+-		}
+-
+-		$awareness = json_decode( $meta_value, true );
++		$room_hash = md5( $room ); // Not used for cryptographic purposes.
++		$awareness = get_transient( self::AWARENESS_TRANSIENT_PREFIX . ":{$room_hash}" );
+ 
+ 		if ( ! is_array( $awareness ) ) {
+ 			return array();
+ 		}
+ 
++		// Deterministic ordering of transient data.
++		$awareness = wp_list_sort( $awareness, 'client_id' );
+ 		return array_values( $awareness );
+ 	}
+ 
+@@ -144,54 +110,24 @@ public function get_awareness_state( string $room ): array {
+ 	 *
+ 	 * @since 7.0.0
+ 	 *
+-	 * @global wpdb $wpdb WordPress database abstraction object.
+-	 *
+ 	 * @param string            $room      Room identifier.
+ 	 * @param array<int, mixed> $awareness Serializable awareness state.
+ 	 * @return bool True on success, false on failure.
+ 	 */
+ 	public function set_awareness_state( string $room, array $awareness ): bool {
+-		global $wpdb;
+-
+-		$post_id = $this->get_storage_post_id( $room );
+-		if ( null === $post_id ) {
+-			return false;
+-		}
+-
+-		// Use direct database operation to avoid cache invalidation performed by
+-		// post meta functions (`wp_cache_set_posts_last_changed()` and direct
+-		// `wp_cache_delete()` calls).
+-		//
+-		// If two concurrent requests both see no row and both INSERT, the
+-		// duplicate is harmless: get_awareness_state() reads the latest row
+-		// (ORDER BY meta_id DESC).
+-		$meta_id = $wpdb->get_var(
+-			$wpdb->prepare(
+-				"SELECT meta_id FROM $wpdb->postmeta WHERE post_id = %d AND meta_key = %s ORDER BY meta_id DESC LIMIT 1",
+-				$post_id,
+-				self::AWARENESS_META_KEY
+-			)
+-		);
+-
+-		if ( $meta_id ) {
+-			return (bool) $wpdb->update(
+-				$wpdb->postmeta,
+-				array( 'meta_value' => wp_json_encode( $awareness ) ),
+-				array( 'meta_id' => $meta_id ),
+-				array( '%s' ),
+-				array( '%d' )
+-			);
+-		}
+-
+-		return (bool) $wpdb->insert(
+-			$wpdb->postmeta,
+-			array(
+-				'post_id'    => $post_id,
+-				'meta_key'   => self::AWARENESS_META_KEY,
+-				'meta_value' => wp_json_encode( $awareness ),
+-			),
+-			array( '%d', '%s', '%s' )
+-		);
++		$room_hash = md5( $room ); // Not used for cryptographic purposes.
++		// Deterministic ordering of transient data.
++		$awareness = wp_list_sort( $awareness, 'client_id' );
++
++		/*
++		 * Maintain transient for longer than awareness.
++		 *
++		 * Recently used rooms are more likely to be used again soon. Maintaining the
++		 * transient longer than the awareness can avoid adding new entries in the options
++		 * table unnecessarily.
++		 */
++		set_transient( self::AWARENESS_TRANSIENT_PREFIX . ":{$room_hash}", $awareness, DAY_IN_SECONDS );
++		return true;
+ 	}
+ 
+ 	/**
+@@ -281,8 +217,6 @@ public function get_update_count( string $room ): int {
+ 	 *
+ 	 * @since 7.0.0
+ 	 *
+-	 * @global wpdb $wpdb WordPress database abstraction object.
+-	 *
+ 	 * @param string $room   Room identifier.
+ 	 * @param int    $cursor Return updates after this cursor (meta_id).
+ 	 * @return array<int, mixed> Sync updates.
+@@ -332,10 +266,7 @@ public function get_updates_after_cursor( string $room, int $cursor ): array {
+ 
+ 		$updates = array();
+ 		foreach ( $rows as $row ) {
+-			$decoded = json_decode( $row->meta_value, true );
+-			if ( null !== $decoded ) {
+-				$updates[] = $decoded;
+-			}
++			$updates[] = maybe_unserialize( $row->meta_value );
+ 		}
+ 
+ 		return $updates;
+@@ -346,8 +277,6 @@ public function get_updates_after_cursor( string $room, int $cursor ): array {
+ 	 *
+ 	 * @since 7.0.0
+ 	 *
+-	 * @global wpdb $wpdb WordPress database abstraction object.
+-	 *
+ 	 * @param string $room   Room identifier.
+ 	 * @param int    $cursor Remove updates with meta_id < this cursor.
+ 	 * @return bool True on success, false on failure.
+@@ -373,6 +302,7 @@ public function remove_updates_before_cursor( string $room, int $cursor ): bool
+ 			return false;
+ 		}
+ 
++		wp_cache_maybe_set_posts_last_changed_following_post_meta_update( array(), $post_id, self::SYNC_UPDATE_META_KEY );
+ 		return true;
+ 	}
+ }
+diff --git a/src/wp-includes/default-filters.php b/src/wp-includes/default-filters.php
+index 4b6d9de25fa11..74a7b1dc02697 100644
+--- a/src/wp-includes/default-filters.php
++++ b/src/wp-includes/default-filters.php
+@@ -122,9 +122,10 @@
+ }
+ 
+ // Post meta.
+-add_action( 'added_post_meta', 'wp_cache_set_posts_last_changed' );
+-add_action( 'updated_post_meta', 'wp_cache_set_posts_last_changed' );
+-add_action( 'deleted_post_meta', 'wp_cache_set_posts_last_changed' );
++add_action( 'added_post_meta', 'wp_cache_maybe_set_posts_last_changed_following_post_meta_update', 10, 3 );
++add_action( 'updated_post_meta', 'wp_cache_maybe_set_posts_last_changed_following_post_meta_update', 10, 3 );
++add_action( 'deleted_post_meta', 'wp_cache_maybe_set_posts_last_changed_following_post_meta_update', 10, 3 );
++add_action( 'init', 'wp_create_initial_post_meta' );
+ 
+ // User meta.
+ add_action( 'added_user_meta', 'wp_cache_set_users_last_changed' );
+@@ -769,9 +770,6 @@
+ // User preferences.
+ add_action( 'init', 'wp_register_persisted_preferences_meta' );
+ 
+-// CPT wp_block custom postmeta field.
+-add_action( 'init', 'wp_create_initial_post_meta' );
+-
+ // Include revisioned meta when considering whether a post revision has changed.
+ add_filter( 'wp_save_post_revision_post_has_changed', 'wp_check_revisioned_meta_fields_have_changed', 10, 3 );
+ 
+diff --git a/src/wp-includes/meta.php b/src/wp-includes/meta.php
+index c657c6c2e7af3..a32e19f0cf7ab 100644
+--- a/src/wp-includes/meta.php
++++ b/src/wp-includes/meta.php
+@@ -1396,6 +1396,7 @@ function sanitize_meta( $meta_key, $meta_value, $object_type, $object_subtype =
+  * @since 5.5.0 The `$default` argument was added to the arguments array.
+  * @since 6.4.0 The `$revisions_enabled` argument was added to the arguments array.
+  * @since 6.7.0 The `label` argument was added to the arguments array.
++ * @since 7.0.0 The `$jit_cache_invalidation` argument was added to the arguments array.
+  *
+  * @global array $wp_meta_keys Global registry for meta keys.
+  *
+@@ -1405,27 +1406,30 @@ function sanitize_meta( $meta_key, $meta_value, $object_type, $object_subtype =
+  * @param array        $args {
+  *     Data used to describe the meta key when registered.
+  *
+- *     @type string     $object_subtype    A subtype; e.g. if the object type is "post", the post type. If left empty,
+- *                                         the meta key will be registered on the entire object type. Default empty.
+- *     @type string     $type              The type of data associated with this meta key.
+- *                                         Valid values are 'string', 'boolean', 'integer', 'number', 'array', and 'object'.
+- *     @type string     $label             A human-readable label of the data attached to this meta key.
+- *     @type string     $description       A description of the data attached to this meta key.
+- *     @type bool       $single            Whether the meta key has one value per object, or an array of values per object.
+- *     @type mixed      $default           The default value returned from get_metadata() if no value has been set yet.
+- *                                         When using a non-single meta key, the default value is for the first entry.
+- *                                         In other words, when calling get_metadata() with `$single` set to `false`,
+- *                                         the default value given here will be wrapped in an array.
+- *     @type callable   $sanitize_callback A function or method to call when sanitizing `$meta_key` data.
+- *     @type callable   $auth_callback     Optional. A function or method to call when performing edit_post_meta,
+- *                                         add_post_meta, and delete_post_meta capability checks.
+- *     @type bool|array $show_in_rest      Whether data associated with this meta key can be considered public and
+- *                                         should be accessible via the REST API. A custom post type must also declare
+- *                                         support for custom fields for registered meta to be accessible via REST.
+- *                                         When registering complex meta values this argument may optionally be an
+- *                                         array with 'schema' or 'prepare_callback' keys instead of a boolean.
+- *     @type bool       $revisions_enabled Whether to enable revisions support for this meta_key. Can only be used when the
+- *                                         object type is 'post'.
++ *     @type string     $object_subtype         A subtype; e.g. if the object type is "post", the post type. If left empty,
++ *                                              the meta key will be registered on the entire object type. Default empty.
++ *     @type string     $type                   The type of data associated with this meta key.
++ *                                              Valid values are 'string', 'boolean', 'integer', 'number', 'array', and 'object'.
++ *     @type string     $label                  A human-readable label of the data attached to this meta key.
++ *     @type string     $description            A description of the data attached to this meta key.
++ *     @type bool       $single                 Whether the meta key has one value per object, or an array of values per object.
++ *     @type mixed      $default                The default value returned from get_metadata() if no value has been set yet.
++ *                                              When using a non-single meta key, the default value is for the first entry.
++ *                                              In other words, when calling get_metadata() with `$single` set to `false`,
++ *                                              the default value given here will be wrapped in an array.
++ *     @type callable   $sanitize_callback      A function or method to call when sanitizing `$meta_key` data.
++ *     @type callable   $auth_callback          Optional. A function or method to call when performing edit_post_meta,
++ *                                              add_post_meta, and delete_post_meta capability checks.
++ *     @type bool|array $show_in_rest           Whether data associated with this meta key can be considered public and
++ *                                              should be accessible via the REST API. A custom post type must also declare
++ *                                              support for custom fields for registered meta to be accessible via REST.
++ *                                              When registering complex meta values this argument may optionally be an
++ *                                              array with 'schema' or 'prepare_callback' keys instead of a boolean.
++ *     @type bool       $revisions_enabled      Whether to enable revisions support for this meta_key. Can only be used when the
++ *                                              object type is 'post'.
++ *     @type bool       $jit_cache_invalidation Whether to enable just-in-time cache invalidation for this meta key. When enabled, the cache
++ *                                              for WP_Query will be invalidated the next time a meta query is run. Can only be used when the
++ *                                              object type is 'post'.
+  * }
+  * @param string|array $deprecated Deprecated. Use `$args` instead.
+  * @return bool True if the meta key was successfully registered in the global array, false if not.
+@@ -1450,6 +1454,7 @@ function register_meta( $object_type, $meta_key, $args, $deprecated = null ) {
+ 		'auth_callback'     => null,
+ 		'show_in_rest'      => false,
+ 		'revisions_enabled' => false,
++		'jit_cache_invalidation' => false,
+ 	);
+ 
+ 	// There used to be individual args for sanitize and auth callbacks.
+@@ -1508,6 +1513,12 @@ function register_meta( $object_type, $meta_key, $args, $deprecated = null ) {
+ 		}
+ 	}
+ 
++	if ( $args['jit_cache_invalidation'] && 'post' !== $object_type ) {
++		_doing_it_wrong( __FUNCTION__, __( 'Just-in-time cache invalidation for meta keys is only supported with the "post" object type.' ), '7.0.0' );
++
++		return false;
++	}
++
+ 	// If `auth_callback` is not provided, fall back to `is_protected_meta()`.
+ 	if ( empty( $args['auth_callback'] ) ) {
+ 		if ( is_protected_meta( $meta_key, $object_type ) ) {
+diff --git a/src/wp-includes/post.php b/src/wp-includes/post.php
+index 215fa153f7495..9af3193e71055 100644
+--- a/src/wp-includes/post.php
++++ b/src/wp-includes/post.php
+@@ -8445,6 +8445,51 @@ function wp_add_trashed_suffix_to_post_name_for_post( $post ) {
+  */
+ function wp_cache_set_posts_last_changed() {
+ 	wp_cache_set_last_changed( 'posts' );
++	// Indicate meta query cache is updated for use in WP_Query
++	wp_cache_set( 'wp_query_meta_query_updated', true, 'post_meta' );
++}
++
++/**
++ * Handles cache invalidation for post meta updates.
++ *
++ * For post meta registered as using just-in-time cache invalidation, the
++ * post_meta cache is updated to indicate that a cache flush is required for the
++ * next `WP_Query` call containing a meta query.
++ *
++ * For unregisistered post meta or post meta without JIT cache invalidation support
++ * the `WP_Query` cache group is flushed by calling wp_cache_set_posts_last_changed().
++ *
++ * @since 7.0.0
++ *
++ * @param int    $meta_ids   Array of meta IDs that were updated.
++ * @param int    $object_id  Object ID for which the meta was updated.
++ * @param string $meta_key   Meta key that was updated.
++ */
++function wp_cache_maybe_set_posts_last_changed_following_post_meta_update( $meta_ids, $object_id, $meta_key ) {
++	$post_type = get_post_type( $object_id );
++	$registered_meta_keys = array_merge(
++		get_registered_meta_keys( 'post' ),
++		get_registered_meta_keys( 'post', $post_type )
++	);
++	$meta_key_data = array();
++	if ( isset( $registered_meta_keys[ $meta_key ] ) ) {
++		$meta_key_data = $registered_meta_keys[ $meta_key ];
++	}
++
++	if ( isset( $meta_key_data['jit_cache_invalidation'] ) && $meta_key_data['jit_cache_invalidation'] ) {
++		/*
++		 * Indicate meta queries require just-in-time cache invalidation.
++		 *
++		 * Clears the `wp_query_meta_query_updated` cache key to indicate that WP_Query requires
++		 * just-in-time cache invalidation for the next meta query. This is to avoid flushing
++		 * the entire `posts` cache group on all post meta updates, and instead only flushes
++		 * the cache for meta queries when necessary.
++		 */
++		wp_cache_delete( 'wp_query_meta_query_updated', 'post_meta' );
++		return;
++	}
++
++	wp_cache_set_posts_last_changed();
+ }
+ 
+ /**
+@@ -8652,7 +8697,9 @@ function use_block_editor_for_post_type( $post_type ) {
+  * Registers any additional post meta fields.
+  *
+  * @since 6.3.0 Adds `wp_pattern_sync_status` meta field to the wp_block post type so an unsynced option can be added.
+- * @since 7.0.0 Adds `_crdt_document` meta field to post types so that CRDT documents can be persisted.
++ * @since 7.0.0 Adds `_edit_lock` for use of just-in-time cache invalidation; `_crdt_document` meta field to post types so that CRDT
++ *              documents can be persisted and `WP_Sync_Post_Meta_Storage::SYNC_UPDATE_META_KEY` to the sync post type for storing
++ *              pending sync updates.
+  *
+  * @link https://github.com/WordPress/gutenberg/pull/51144
+  */
+@@ -8673,6 +8720,15 @@ function wp_create_initial_post_meta() {
+ 		)
+ 	);
+ 
++	register_post_meta(
++		'',
++		'_edit_lock',
++		array(
++			'show_in_rest'           => false,
++			'jit_cache_invalidation' => true,
++		)
++	);
++
+ 	if ( wp_is_collaboration_enabled() ) {
+ 		register_meta(
+ 			'post',
+@@ -8697,5 +8753,14 @@ function wp_create_initial_post_meta() {
+ 				'type'              => 'string',
+ 			)
+ 		);
++
++		register_post_meta(
++			WP_Sync_Post_Meta_Storage::POST_TYPE,
++			WP_Sync_Post_Meta_Storage::SYNC_UPDATE_META_KEY,
++			array(
++				'show_in_rest'           => false,
++				'jit_cache_invalidation' => true,
++			)
++		);
+ 	}
+ }

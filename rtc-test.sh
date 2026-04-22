@@ -67,16 +67,28 @@ if [ -f "${_env_file}" ]; then
 	_pre_nonce="${WP_NONCE:-}"
 	_pre_path="${WP_PATH:-}"
 	_pre_post="${POST_ID:-}"
+	_pre_approach="${APPROACH:-}"
+	_pre_reporter_url="${REPORTER_URL:-}"
+	_pre_reporter_user="${REPORTER_USER:-}"
+	_pre_reporter_pass="${REPORTER_PASS:-}"
+	_pre_env_name="${ENVIRONMENT_NAME:-}"
 	# shellcheck source=/dev/null
 	. "${_env_file}"
-	[ -n "${_pre_url}"   ] && WP_URL="${_pre_url}"
-	[ -n "${_pre_user}"  ] && WP_USER="${_pre_user}"
-	[ -n "${_pre_pass}"  ] && WP_PASS="${_pre_pass}"
-	[ -n "${_pre_jar}"   ] && WP_COOKIE_JAR="${_pre_jar}"
-	[ -n "${_pre_nonce}" ] && WP_NONCE="${_pre_nonce}"
-	[ -n "${_pre_path}"  ] && WP_PATH="${_pre_path}"
-	[ -n "${_pre_post}"  ] && POST_ID="${_pre_post}"
-	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post
+	[ -n "${_pre_url}"           ] && WP_URL="${_pre_url}"
+	[ -n "${_pre_user}"          ] && WP_USER="${_pre_user}"
+	[ -n "${_pre_pass}"          ] && WP_PASS="${_pre_pass}"
+	[ -n "${_pre_jar}"           ] && WP_COOKIE_JAR="${_pre_jar}"
+	[ -n "${_pre_nonce}"         ] && WP_NONCE="${_pre_nonce}"
+	[ -n "${_pre_path}"          ] && WP_PATH="${_pre_path}"
+	[ -n "${_pre_post}"          ] && POST_ID="${_pre_post}"
+	[ -n "${_pre_approach}"      ] && APPROACH="${_pre_approach}"
+	[ -n "${_pre_reporter_url}"  ] && REPORTER_URL="${_pre_reporter_url}"
+	[ -n "${_pre_reporter_user}" ] && REPORTER_USER="${_pre_reporter_user}"
+	[ -n "${_pre_reporter_pass}" ] && REPORTER_PASS="${_pre_reporter_pass}"
+	[ -n "${_pre_env_name}"      ] && ENVIRONMENT_NAME="${_pre_env_name}"
+	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post \
+	      _pre_approach _pre_reporter_url _pre_reporter_user _pre_reporter_pass \
+	      _pre_env_name
 fi
 unset _env_file
 
@@ -98,6 +110,7 @@ N_CLIENTS="${N_CLIENTS:-3}"
 DURATION="${DURATION:-30}"      # Seconds to run for sustain command
 UPDATE_SIZE="${UPDATE_SIZE:-small}"
 APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
+CURRENT_APPROACH="${CURRENT_APPROACH:-}"  # Approach currently patched in (written by apply-approach)
 
 # -------------------------------------------------------------------------
 # Deterministic test constants
@@ -419,6 +432,219 @@ cmd_ensure_wp_version() {
 }
 
 # -------------------------------------------------------------------------
+# Approach helpers
+# -------------------------------------------------------------------------
+
+# approach_patch_file APPROACH -- prints the absolute patch file path, or empty
+# string if the approach is the RC2 baseline (no patch required).
+approach_patch_file() {
+	case "$1" in
+		custom-table)         printf '%s' "${SCRIPT_DIR}/patches/02-custom-table.patch" ;;
+		post-meta-transients) printf '%s' "${SCRIPT_DIR}/patches/03-post-meta-transients.patch" ;;
+		custom-table-with-transients)  printf '%s' "${SCRIPT_DIR}/patches/04-custom-table-with-transients.patch" ;;
+		*)                    printf '' ;;  # post-meta (RC2 baseline) or empty
+	esac
+}
+
+# approach_has_schema_change APPROACH -- returns 0 if the approach adds the
+# wp_collaboration table (requires wp core update-db and table teardown).
+approach_has_schema_change() {
+	case "$1" in
+		custom-table|custom-table-with-transients) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# _build_wp_flags -- populates a local array named WP_FLAGS from the current
+# environment. Call as: local WP_FLAGS=(); _build_wp_flags
+_build_wp_flags() {
+	[ "$(id -u)" = "0" ] && WP_FLAGS+=( "--allow-root" )
+	WP_FLAGS+=( "--path=${WP_PATH}" )
+	[ -n "${WP_URL:-}" ] && WP_FLAGS+=( "--url=${WP_URL}" )
+}
+
+# _clear_rtc_data WP_FLAGS... -- deletes all RTC collaboration data so the next
+# approach starts from a clean state. Handles all three storage types safely:
+# post meta rows, the collaboration table (if present), and awareness transients.
+_clear_rtc_data() {
+	printf 'Clearing RTC collaboration data...\n'
+	wp "$@" eval '
+		global $wpdb;
+
+		// Remove post meta rows written by the post-meta storage implementation.
+		$deleted = (int) $wpdb->query(
+			"DELETE FROM {$wpdb->postmeta}
+			 WHERE meta_key IN (\"wp_sync_update\", \"wp_sync_awareness_state\")"
+		);
+		echo "  Post meta RTC rows deleted: {$deleted}\n";
+
+		// Truncate the collaboration table if it exists (custom-table approaches).
+		$collab = $wpdb->prefix . "collaboration";
+		$exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $collab ) );
+		if ( $exists ) {
+			$wpdb->query( "TRUNCATE TABLE `{$collab}`" );
+			echo "  Collaboration table truncated.\n";
+		}
+
+		// Remove awareness transients (post-meta-transients approach).
+		$deleted = (int) $wpdb->query(
+			"DELETE FROM {$wpdb->options}
+			 WHERE option_name LIKE \"_transient_wp_sync_awareness%\"
+			    OR option_name LIKE \"_transient_timeout_wp_sync_awareness%\""
+		);
+		if ( $deleted > 0 ) {
+			echo "  Awareness transients deleted: {$deleted}\n";
+		}
+	' 2>/dev/null || printf '  WARNING: Could not clear RTC data via WP-CLI.\n'
+}
+
+# _write_current_approach APPROACH -- records the active approach in the env file.
+_write_current_approach() {
+	local approach="$1"
+	local env_file
+	env_file="$(resolve_env_file)"
+	local tmp
+	tmp="$(mktemp)"
+	grep -v '^CURRENT_APPROACH=' "${env_file}" > "${tmp}" && mv "${tmp}" "${env_file}"
+	printf 'CURRENT_APPROACH="%s"\n' "${approach}" >> "${env_file}"
+}
+
+cmd_apply_approach() {
+	local approach="${1:-}"
+	[ -n "${approach}" ] || die "Usage: bash rtc-test.sh apply-approach <approach>
+  Approaches: post-meta  custom-table  post-meta-transients  custom-table-with-transients"
+
+	case "${approach}" in
+		post-meta|custom-table|post-meta-transients|custom-table-with-transients) ;;
+		*) die "Unknown approach '${approach}'. Valid: post-meta  custom-table  post-meta-transients  custom-table-with-transients" ;;
+	esac
+
+	print_header "apply-approach (${approach})"
+	command -v wp >/dev/null 2>&1 || die "WP-CLI is required for apply-approach."
+	[ -n "${WP_PATH:-}" ] || die "WP_PATH is not set. Add it to your .env file."
+
+	local WP_FLAGS=()
+	_build_wp_flags
+
+	# Step 1: Reverse the current patch if one is applied.
+	local current="${CURRENT_APPROACH:-}"
+	if [ -n "${current}" ] && [ "${current}" != "post-meta" ]; then
+		local current_patch
+		current_patch="$(approach_patch_file "${current}")"
+		if [ -n "${current_patch}" ] && [ -f "${current_patch}" ]; then
+			printf 'Reversing patch for %s...\n' "${current}"
+			patch --dry-run -R -p2 -d "${WP_PATH}" < "${current_patch}" >/dev/null 2>&1 \
+				|| die "Reverse dry-run failed for ${current}. Files may have diverged; inspect manually."
+			patch -R -p2 -d "${WP_PATH}" < "${current_patch}" \
+				|| die "Failed to reverse patch for ${current}."
+			printf 'Reversed.\n'
+		fi
+	fi
+
+	# Step 2: If the outgoing approach added a table, drop it now that the schema is reverted.
+	if approach_has_schema_change "${current:-}"; then
+		local table_prefix
+		table_prefix="$(wp "${WP_FLAGS[@]}" eval 'global $wpdb; echo $wpdb->prefix;' 2>/dev/null)"
+		printf 'Dropping %scollaboration table...\n' "${table_prefix}"
+		wp "${WP_FLAGS[@]}" db query \
+			"DROP TABLE IF EXISTS \`${table_prefix}collaboration\`;" 2>/dev/null \
+			&& printf 'Dropped.\n' \
+			|| printf 'WARNING: Could not drop %scollaboration.\n' "${table_prefix}"
+	fi
+
+	# Step 3: Apply the new approach's patch.
+	local new_patch
+	new_patch="$(approach_patch_file "${approach}")"
+	if [ -n "${new_patch}" ]; then
+		[ -f "${new_patch}" ] || die "Patch file not found: ${new_patch}"
+		printf 'Applying patch for %s...\n' "${approach}"
+		patch --dry-run -p2 -d "${WP_PATH}" < "${new_patch}" >/dev/null 2>&1 \
+			|| die "Patch dry-run failed. Files may not match the expected RC2 state."
+		patch -p2 -d "${WP_PATH}" < "${new_patch}" \
+			|| die "Patch failed. WordPress files may be in an inconsistent state."
+		printf 'Patch applied.\n'
+	else
+		printf 'Approach %s is the RC2 baseline — no patch needed.\n' "${approach}"
+	fi
+
+	# Step 4: Run DB upgrade if the new approach introduces a schema change.
+	if approach_has_schema_change "${approach}"; then
+		printf 'Running database upgrade (adds collaboration table)...\n'
+		wp "${WP_FLAGS[@]}" core update-db || die "Database upgrade failed."
+		local db_ver
+		db_ver="$(wp "${WP_FLAGS[@]}" option get db_version 2>/dev/null)"
+		if [ "${db_ver:-0}" -ge 61841 ] 2>/dev/null; then
+			printf 'Database:       version %s (collaboration table ready)\n' "${db_ver}"
+		else
+			printf 'WARNING: db_version is %s, expected >= 61841. RTC may not activate.\n' "${db_ver}"
+		fi
+	fi
+
+	# Step 5: Clear all RTC data so this run starts from a clean state.
+	_clear_rtc_data "${WP_FLAGS[@]}"
+
+	# Step 6: Flush the object cache so stale awareness from the previous approach is gone.
+	wp "${WP_FLAGS[@]}" cache flush 2>/dev/null \
+		&& printf 'Object cache:   flushed\n' \
+		|| printf 'Object cache:   no external cache to flush\n'
+
+	# Step 7: Ensure RTC is enabled.
+	wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1 \
+		&& printf 'RTC:            enabled\n' \
+		|| printf 'WARNING: Could not enable RTC. Verify in Settings > Writing.\n'
+
+	# Step 8: Record the active approach.
+	_write_current_approach "${approach}"
+	printf '\nApproach "%s" is ready. Run tests with APPROACH="%s".\n' \
+		"${approach}" "${approach}"
+}
+
+cmd_reset_approach() {
+	print_header "reset-approach"
+	command -v wp >/dev/null 2>&1 || die "WP-CLI is required for reset-approach."
+	[ -n "${WP_PATH:-}" ] || die "WP_PATH is not set. Add it to your .env file."
+
+	local current="${CURRENT_APPROACH:-}"
+	if [ -z "${current}" ] || [ "${current}" = "post-meta" ]; then
+		printf 'Already at RC2 baseline (post-meta). Nothing to reverse.\n'
+		return 0
+	fi
+
+	local WP_FLAGS=()
+	_build_wp_flags
+
+	local current_patch
+	current_patch="$(approach_patch_file "${current}")"
+	if [ -n "${current_patch}" ] && [ -f "${current_patch}" ]; then
+		printf 'Reversing patch for %s...\n' "${current}"
+		patch --dry-run -R -p2 -d "${WP_PATH}" < "${current_patch}" >/dev/null 2>&1 \
+			|| die "Reverse dry-run failed. Inspect ${WP_PATH} manually."
+		patch -R -p2 -d "${WP_PATH}" < "${current_patch}" \
+			|| die "Failed to reverse patch."
+		printf 'Reversed.\n'
+	fi
+
+	if approach_has_schema_change "${current}"; then
+		local table_prefix
+		table_prefix="$(wp "${WP_FLAGS[@]}" eval 'global $wpdb; echo $wpdb->prefix;' 2>/dev/null)"
+		printf 'Dropping %scollaboration table...\n' "${table_prefix}"
+		wp "${WP_FLAGS[@]}" db query \
+			"DROP TABLE IF EXISTS \`${table_prefix}collaboration\`;" 2>/dev/null \
+			&& printf 'Dropped.\n' \
+			|| printf 'WARNING: Could not drop table.\n'
+	fi
+
+	_clear_rtc_data "${WP_FLAGS[@]}"
+
+	wp "${WP_FLAGS[@]}" cache flush 2>/dev/null || true
+
+	wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1 || true
+
+	_write_current_approach "post-meta"
+	printf '\nReset to RC2 baseline (post-meta).\n'
+}
+
+# -------------------------------------------------------------------------
 # Commands
 # -------------------------------------------------------------------------
 
@@ -714,7 +940,7 @@ cmd_baseline() {
 		total_ms=$((total_ms + ms))
 		total_srv=$((total_srv + server_ms))
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 	printf 'mean: total_ms=%s server_ms=%s\n' "$((total_ms / POLLS))" "$((total_srv / POLLS))"
 	printf '\nNote: baseline requests are NOT tagged with X-RTC-Test.\n'
@@ -768,7 +994,7 @@ cmd_single_idle() {
 			"${i}" "${cursor}" "${awareness}" "${total_updates}" "${client_ms}" "${server_ms}" "${tls_ms}"
 
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -814,7 +1040,7 @@ cmd_two_idle() {
 			"${cursor_b}" "${awareness_b}" "${b_sees_a}"
 
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -931,7 +1157,7 @@ cmd_one_idle_one_editing() {
 			"${ms_b}" "${server_ms_b}" "${cursor_b}" "${updates_delivered}"
 
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -975,7 +1201,7 @@ cmd_n_idle() {
 		done
 		printf '\n'
 		round=$((round + 1))
-		[ "${round}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${round}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -1144,7 +1370,7 @@ cmd_concurrent() {
 		rm -rf "${tmpdir}"
 
 		round=$(( round + 1 ))
-		[ "${round}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${round}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 	printf '\nRun: bash rtc-test.sh report\n'
 	printf 'The "conc" column shows max simultaneous workers seen by the plugin.\n'
@@ -1403,6 +1629,259 @@ cmd_report() {
 		}
 	}
 	'
+}
+
+cmd_report_all() {
+	print_header "report-all"
+	require_auth
+
+	# Fetch the full log once.
+	local log
+	log=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
+
+	if [ -z "${log}" ] || [ "${log}" = "[]" ]; then
+		printf 'No log entries found.\n'
+		return
+	fi
+
+	case "${log}" in
+		'{'*)
+			printf 'ERROR: log endpoint returned an error:\n  %s\n' "${log}"
+			return 1 ;;
+	esac
+
+	# Summarise by approach × scenario.
+	printf '%s' "${log}" | awk '
+	function extract_str(s, key,    pat, val) {
+		pat = "\"" key "\":\""
+		if (!match(s, pat "[^\"]+\"")) return ""
+		val = substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
+		return val
+	}
+	function extract_num(s, key,    pat) {
+		pat = "\"" key "\":[0-9.]+"
+		if (!match(s, pat)) return 0
+		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
+	}
+	{
+		n = split($0, entries, /\},\{/)
+		for (i = 1; i <= n; i++) {
+			e        = entries[i]
+			approach = extract_str(e, "approach")
+			if (approach == "") approach = "(untagged)"
+			scenario     = extract_str(e, "scenario")
+			key          = approach SUBSEP scenario
+			ms           = extract_num(e, "ms")
+			total_ms     = extract_num(e, "total_ms")
+			cpu_ms       = extract_num(e, "cpu_ms")
+			total_cpu_ms = extract_num(e, "total_cpu_ms")
+			dbq          = extract_num(e, "db_queries")
+			dbt          = extract_num(e, "db_time_ms")
+			peak         = extract_num(e, "peak_memory")
+			conc         = extract_num(e, "concurrent")
+
+			count[key]++
+			ms_sum[key]           += ms
+			ms_sq[key]            += ms * ms
+			total_ms_sum[key]     += total_ms
+			cpu_ms_sum[key]       += cpu_ms
+			total_cpu_ms_sum[key] += total_cpu_ms
+			dbq_sum[key]          += dbq
+			dbt_sum[key]          += dbt
+			peak_sum[key]         += peak
+			if (conc > max_conc[key]) max_conc[key] = conc
+
+			approaches[approach] = 1
+			scenarios[scenario]  = 1
+		}
+	}
+	END {
+		# Collect and sort approach/scenario lists.
+		na = 0; for (a in approaches) { ap[++na] = a }
+		ns = 0; for (s in scenarios)  { sc[++ns] = s }
+
+		for (ai = 1; ai <= na; ai++) {
+			a = ap[ai]
+			printf "\n── Approach: %s ──\n", a
+			printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n",
+				"Scenario", "n", "disp_ms", "total_ms", "cpu_ms", "tot_cpu_ms",
+				"sd_disp", "db_q", "db_t_ms", "conc"
+			printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n",
+				"----------------------","------","--------","--------",
+				"--------","-----------","--------","--------","--------","------"
+
+			baseline_mean = 0
+			key = a SUBSEP "baseline"
+			if (count[key] > 0) baseline_mean = ms_sum[key] / count[key]
+
+			for (si = 1; si <= ns; si++) {
+				s   = sc[si]
+				key = a SUBSEP s
+				if (!(key in count)) continue
+				n    = count[key]
+				mean = ms_sum[key] / n
+				var  = (ms_sq[key] / n) - (mean * mean)
+				if (var < 0) var = 0
+				printf "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6d\n",
+					s, n, mean,
+					total_ms_sum[key] / n, cpu_ms_sum[key] / n,
+					total_cpu_ms_sum[key] / n,
+					sqrt(var),
+					dbq_sum[key] / n, dbt_sum[key] / n,
+					max_conc[key]
+			}
+
+			if (baseline_mean > 0) {
+				printf "\n  Ratio to baseline (disp_ms):\n"
+				for (si = 1; si <= ns; si++) {
+					s = sc[si]
+					if (s == "baseline") continue
+					key = a SUBSEP s
+					if (!(key in count)) continue
+					printf "    %-22s %.2fx\n", s, (ms_sum[key] / count[key]) / baseline_mean
+				}
+			}
+		}
+	}
+	'
+}
+
+cmd_submit_results() {
+	print_header "submit-results"
+	require_auth
+
+	# Reporter endpoint config — required to submit.
+	local reporter_url="${REPORTER_URL:-}"
+	local reporter_user="${REPORTER_USER:-}"
+	local reporter_pass="${REPORTER_PASS:-}"
+	if [ -z "${reporter_url}" ] || [ -z "${reporter_user}" ] || [ -z "${reporter_pass}" ]; then
+		printf 'REPORTER_URL, REPORTER_USER, and REPORTER_PASS must be set to submit results.\n'
+		printf 'Skipping submission.\n'
+		return 0
+	fi
+
+	# Fetch environment fingerprint for the submission payload.
+	local env_json
+	env_json=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_ENV_URL}" 2>/dev/null) || env_json='{}'
+
+	# Fetch the full log.
+	local log
+	log=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
+	if [ -z "${log}" ] || [ "${log}" = "[]" ]; then
+		printf 'No log entries to submit.\n'
+		return 0
+	fi
+
+	# Aggregate per approach × scenario and build the results JSON using awk.
+	local results_json
+	results_json=$(printf '%s' "${log}" | awk '
+	function extract_str(s, key,    pat, val) {
+		pat = "\"" key "\":\""
+		if (!match(s, pat "[^\"]+\"")) return ""
+		val = substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
+		return val
+	}
+	function extract_num(s, key,    pat) {
+		pat = "\"" key "\":[0-9.]+"
+		if (!match(s, pat)) return 0
+		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
+	}
+	{
+		n = split($0, entries, /\},\{/)
+		for (i = 1; i <= n; i++) {
+			e            = entries[i]
+			approach     = extract_str(e, "approach")
+			if (approach == "") approach = "untagged"
+			scenario     = extract_str(e, "scenario")
+			key          = approach SUBSEP scenario
+			ms           = extract_num(e, "ms")
+			total_ms     = extract_num(e, "total_ms")
+			cpu_ms       = extract_num(e, "cpu_ms")
+			total_cpu_ms = extract_num(e, "total_cpu_ms")
+			dbq          = extract_num(e, "db_queries")
+			dbt          = extract_num(e, "db_time_ms")
+			peak         = extract_num(e, "peak_memory")
+			conc         = extract_num(e, "concurrent")
+
+			count[key]++
+			ms_sum[key]           += ms
+			ms_sq[key]            += ms * ms
+			total_ms_sum[key]     += total_ms
+			cpu_ms_sum[key]       += cpu_ms
+			total_cpu_ms_sum[key] += total_cpu_ms
+			dbq_sum[key]          += dbq
+			dbt_sum[key]          += dbt
+			peak_sum[key]         += peak
+			if (conc > max_conc[key]) max_conc[key] = conc
+
+			approaches[approach] = 1
+			scenarios[scenario]  = 1
+		}
+	}
+	END {
+		na = 0; for (a in approaches) ap[++na] = a
+		ns = 0; for (s in scenarios)  sc[++ns] = s
+
+		printf "{"
+		for (ai = 1; ai <= na; ai++) {
+			a = ap[ai]
+			if (ai > 1) printf ","
+			printf "\"" a "\":{"
+			first = 1
+			for (si = 1; si <= ns; si++) {
+				s   = sc[si]
+				key = a SUBSEP s
+				if (!(key in count)) continue
+				if (!first) printf ","
+				first = 0
+				n    = count[key]
+				mean = ms_sum[key] / n
+				var  = (ms_sq[key] / n) - (mean * mean)
+				if (var < 0) var = 0
+				printf "\"" s "\":{"
+				printf "\"n\":%d,", n
+				printf "\"mean_disp_ms\":%.2f,", mean
+				printf "\"mean_total_ms\":%.2f,", total_ms_sum[key] / n
+				printf "\"mean_cpu_ms\":%.2f,", cpu_ms_sum[key] / n
+				printf "\"mean_total_cpu_ms\":%.2f,", total_cpu_ms_sum[key] / n
+				printf "\"stddev_disp_ms\":%.2f,", sqrt(var)
+				printf "\"mean_db_queries\":%.1f,", dbq_sum[key] / n
+				printf "\"mean_db_time_ms\":%.2f,", dbt_sum[key] / n
+				printf "\"mean_mem_mb\":%.2f,", peak_sum[key] / n / 1048576
+				printf "\"max_concurrent\":%d", max_conc[key]
+				printf "}"
+			}
+			printf "}"
+		}
+		printf "}"
+	}
+	')
+
+	local environment_name="${ENVIRONMENT_NAME:-${WP_URL}}"
+
+	local payload
+	payload=$(printf '{"environment_name":"%s","env":%s,"results":%s}' \
+		"${environment_name}" "${env_json}" "${results_json}")
+
+	printf 'Submitting results to %s ...\n' "${reporter_url}"
+	local http_code response
+	response=$(curl --silent --show-error \
+		-w '\n__HTTP_STATUS__:%{http_code}' \
+		-u "${reporter_user}:${reporter_pass}" \
+		-H "Content-Type: application/json" \
+		-X POST "${reporter_url}/wp-json/wp-unit-test-api/v1/rtc-performance-results" \
+		-d "${payload}" 2>/dev/null) || { printf 'ERROR: curl request failed.\n'; return 1; }
+
+	http_code=$(printf '%s' "${response}" | grep '__HTTP_STATUS__' | grep -o '[0-9]*$')
+	response=$(printf '%s' "${response}" | grep -v '__HTTP_STATUS__')
+
+	case "${http_code}" in
+		2*)
+			printf 'Submitted successfully (HTTP %s).\n' "${http_code}" ;;
+		*)
+			printf 'ERROR: Submission failed (HTTP %s):\n  %s\n' "${http_code}" "${response}"
+			return 1 ;;
+	esac
 }
 
 cmd_clear() {
@@ -1759,6 +2238,8 @@ COMMAND="${1:-}"
 case "${COMMAND}" in
 	setup)                  cmd_setup ;;
 	ensure-wp-version)      cmd_ensure_wp_version ;;
+	apply-approach)         cmd_apply_approach "${2:-}" ;;
+	reset-approach)         cmd_reset_approach ;;
 	teardown)               cmd_teardown ;;
 	refresh-auth)           cmd_refresh_auth ;;
 	baseline)               cmd_baseline ;;
@@ -1771,6 +2252,8 @@ case "${COMMAND}" in
 	concurrent)             cmd_concurrent ;;
 	sustain)                cmd_sustain ;;
 	report)                 cmd_report ;;
+	report-all)             cmd_report_all ;;
+	submit-results)         cmd_submit_results ;;
 	clear)                  cmd_clear ;;
 	reset)                  cmd_reset ;;
 	seed)                   cmd_seed ;;
@@ -1786,6 +2269,8 @@ case "${COMMAND}" in
 		printf 'Commands:\n'
 		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
 		printf '  ensure-wp-version     Verify WordPress %s is installed; update via WP-CLI if not\n' "${REQUIRED_WP_VERSION}"
+		printf '  apply-approach <name> Patch WP files for the named approach, reset RTC data, run update-db if needed\n'
+		printf '  reset-approach        Reverse the current patch and return to the RC2 baseline\n'
 		printf '  teardown              Delete test post, remove cookie jar, strip generated .env section\n'
 		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
 		printf '  baseline              Measure ambient WP REST overhead (run first)\n'
@@ -1798,6 +2283,8 @@ case "${COMMAND}" in
 		printf '  concurrent            N_CLIENTS burst simultaneously, POLLS rounds (rendezvous-synced)\n'
 		printf '  sustain               N_CLIENTS independent pollers for DURATION seconds\n'
 		printf '  report                Fetch log from plugin and print summary table\n'
+		printf '  report-all            Print summary table grouped by approach × scenario\n'
+		printf '  submit-results        POST all results to the reporter endpoint (requires REPORTER_* vars)\n'
 		printf '  clear                 Delete all log entries (table stays, schema intact)\n'
 		printf '  reset                 Drop the log table entirely (recreated on next tagged request)\n'
 		printf '\nCapture commands (require rtc-capture.php in mu-plugins):\n'
@@ -1823,7 +2310,8 @@ case "${COMMAND}" in
 		printf '  N_CLIENTS     Clients for n-idle/concurrent/sustain (default: 3)\n'
 		printf '  DURATION      Seconds to run for sustain (default: 30)\n'
 		printf '  UPDATE_SIZE   small|medium|large payload (default: small)\n'
-		printf '  APPROACH      Storage approach label written to the log (e.g. post-meta, custom-table)\n'
+		printf '  APPROACH              Storage approach label written to the log (e.g. post-meta, custom-table)\n'
+		printf '  CURRENT_APPROACH      Approach currently patched in (written automatically by apply-approach)\n'
 		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
 		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'
 		exit 1
