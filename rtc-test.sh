@@ -15,15 +15,16 @@
 #
 # Workflow B -- setup on web host, run tests from localhost:
 #   On web host:  bash rtc-test.sh setup
-#                 cat rtc-test.env          # copy output to clipboard
-#   On localhost: paste into rtc-test.env, then:
+#                 cat .env                   # copy output to clipboard
+#   On localhost: paste into .env, then:
+#                 bash rtc-test.sh refresh-auth   # re-login from this host
 #                 bash rtc-test.sh baseline
 #                 bash rtc-test.sh sustain
 #   On web host:  bash rtc-test.sh teardown
 #
 # Commands:
-#   setup               Create rtctest user + test post, write rtc-test.env
-#   teardown            Delete test post, remove rtc-test.env and cookie jar
+#   setup               Install MU-plugin, create rtctest user + test post, write .env
+#   teardown            Delete test post, remove cookie jar, strip generated section from .env
 #   baseline            Measure ambient WP REST overhead (run before scenarios)
 #   single-idle         1 client, POLLS polls, no updates
 #   two-idle            2 clients alternating, awareness propagation check
@@ -39,12 +40,24 @@ set -euo pipefail
 
 # -------------------------------------------------------------------------
 # Config file auto-load
-# Source rtc-test.env (written by setup) before applying defaults so that
+# Source .env (written by setup) before applying defaults so that
 # environment variables set by the caller still take precedence.
 # -------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "${SCRIPT_DIR}/rtc-test.env" ]; then
+
+# resolve_env_file: prints the path of the active env file.
+# Uses .env if it exists, otherwise falls back to .env.example.
+resolve_env_file() {
+	if [ -f "${SCRIPT_DIR}/.env" ]; then
+		printf '%s' "${SCRIPT_DIR}/.env"
+	else
+		printf '%s' "${SCRIPT_DIR}/.env.example"
+	fi
+}
+
+_env_file="$(resolve_env_file)"
+if [ -f "${_env_file}" ]; then
 	# Snapshot any variables the caller already set in the environment so we
 	# can restore them after sourcing -- env vars take precedence over the file.
 	_pre_url="${WP_URL:-}"
@@ -55,7 +68,7 @@ if [ -f "${SCRIPT_DIR}/rtc-test.env" ]; then
 	_pre_path="${WP_PATH:-}"
 	_pre_post="${POST_ID:-}"
 	# shellcheck source=/dev/null
-	. "${SCRIPT_DIR}/rtc-test.env"
+	. "${_env_file}"
 	[ -n "${_pre_url}"   ] && WP_URL="${_pre_url}"
 	[ -n "${_pre_user}"  ] && WP_USER="${_pre_user}"
 	[ -n "${_pre_pass}"  ] && WP_PASS="${_pre_pass}"
@@ -65,9 +78,10 @@ if [ -f "${SCRIPT_DIR}/rtc-test.env" ]; then
 	[ -n "${_pre_post}"  ] && POST_ID="${_pre_post}"
 	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post
 fi
+unset _env_file
 
 # -------------------------------------------------------------------------
-# Configuration (all overridable via environment variables or rtc-test.env)
+# Configuration (all overridable via environment variables or .env)
 # -------------------------------------------------------------------------
 
 WP_URL="${WP_URL:-http://localhost}"
@@ -75,7 +89,7 @@ WP_USER="${WP_USER:-admin}"
 WP_PASS="${WP_PASS:-}"                                            # WP login password (set by setup)
 WP_COOKIE_JAR="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"  # cookie jar path (set by setup)
 WP_NONCE="${WP_NONCE:-}"                                          # wp_rest nonce (set by setup, ~12h TTL)
-WP_PATH="${WP_PATH:-}"       # Path to WordPress root; auto-detected by setup if empty
+WP_PATH="${WP_PATH:-}"       # Absolute path to WordPress root; required by setup
 POST_ID="${POST_ID:-1}"
 POLLS="${POLLS:-10}"
 POLL_DELAY="${POLL_DELAY:-1}"   # Seconds between polls per client (0 = immediate re-poll / stress mode)
@@ -315,8 +329,8 @@ check_rtc_response() {
 	printf '\nPossible causes:\n'
 	printf '  1. Gutenberg RTC feature not enabled (check: wp option get wp_collaboration_enabled)\n'
 	printf '  2. The /wp-sync/v1/updates endpoint does not exist on this install\n'
-	printf '  3. Authentication failed (check WP_USER and WP_PASS in rtc-test.env)\n'
-	printf '     If you copied rtc-test.env from another host, run: bash rtc-test.sh refresh-auth\n'
+	printf '  3. Authentication failed (check WP_USER and WP_PASS in .env)\n'
+	printf '     If you copied .env from another host, run: bash rtc-test.sh refresh-auth\n'
 	printf '  4. POST_ID=%s may not exist or user lacks edit permission\n' "${POST_ID}"
 	return 1
 }
@@ -352,25 +366,6 @@ print_header() {
 }
 
 # -------------------------------------------------------------------------
-# WP-CLI helpers (used only by setup and teardown)
-# -------------------------------------------------------------------------
-
-# find_wp_root
-# Walks up from $PWD, then checks common paths, for wp-config.php.
-# Prints the path on success; prints nothing if not found.
-find_wp_root() {
-	local dir
-	dir="$(pwd)"
-	while [ "${dir}" != "/" ]; do
-		[ -f "${dir}/wp-config.php" ] && { printf '%s' "${dir}"; return; }
-		dir="$(dirname "${dir}")"
-	done
-	for loc in /var/www/html /var/www/wordpress /srv/www/wordpress /app /webroot /public_html; do
-		[ -f "${loc}/wp-config.php" ] && { printf '%s' "${loc}"; return; }
-	done
-}
-
-# -------------------------------------------------------------------------
 # Commands
 # -------------------------------------------------------------------------
 
@@ -386,25 +381,27 @@ cmd_setup() {
 setup_wpcli() {
 	printf 'WP-CLI found. Auto-configuring...\n\n'
 
-	# Build the base flags (no --path yet).
-	local wp_path="${WP_PATH:-$(find_wp_root)}"
+	# WP_PATH is required for setup; no auto-detection.
+	if [ -z "${WP_PATH:-}" ]; then
+		printf 'ERROR: WP_PATH is not set.\n'
+		printf 'Add it to your .env file (copy .env.example if you have not already):\n'
+		printf '  WP_PATH="/var/www/html"\n'
+		printf '\nThen re-run: bash rtc-test.sh setup\n\n'
+		setup_manual
+		return 1
+	fi
+
 	local WP_FLAGS=()
 	[ "$(id -u)" = "0" ] && WP_FLAGS+=( "--allow-root" )
+	WP_FLAGS+=( "--path=${WP_PATH}" )
 
-	# Test without --path first: WP-CLI frequently works from the current
-	# directory via wp-cli.yml or wp-config.php detection, and adding --path
-	# explicitly can break setups that already have a working configuration.
-	if wp "${WP_FLAGS[@]}" core version >/dev/null 2>&1; then
-		printf 'WordPress root: %s (via WP-CLI default)\n' "${wp_path:-"$(pwd)"}"
-	elif [ -n "${wp_path}" ] && wp "${WP_FLAGS[@]}" --path="${wp_path}" core version >/dev/null 2>&1; then
-		WP_FLAGS+=( "--path=${wp_path}" )
-		printf 'WordPress root: %s\n' "${wp_path}"
-	else
-		printf 'WP-CLI cannot reach WordPress.\n'
-		printf 'Set WP_PATH=/path/to/wordpress and retry, or follow manual instructions:\n\n'
+	if ! wp "${WP_FLAGS[@]}" core version >/dev/null 2>&1; then
+		printf 'WP-CLI cannot reach WordPress at: %s\n' "${WP_PATH}"
+		printf 'Verify WP_PATH points to the directory containing wp-config.php.\n\n'
 		setup_manual
-		return
+		return 1
 	fi
+	printf 'WordPress root: %s\n' "${WP_PATH}"
 
 	# Pull the authoritative site URL from the database, then add it to flags
 	# so multisite / subdomain installs resolve correctly.
@@ -427,6 +424,19 @@ setup_wpcli() {
 			printf 'Test requests will likely fail. Check that this URL is reachable\n'
 			printf 'from the host running this script.\n' ;;
 	esac
+
+	# Copy the MU-plugin now, before login/nonce steps that depend on it being active.
+	local wp_content_dir mu_plugins_dir
+	wp_content_dir="$(wp "${WP_FLAGS[@]}" eval 'echo WP_CONTENT_DIR;' 2>/dev/null)"
+	mu_plugins_dir="${wp_content_dir}/mu-plugins"
+	if mkdir -p "${mu_plugins_dir}" 2>/dev/null \
+			&& cp "${SCRIPT_DIR}/rtc-test.php" "${mu_plugins_dir}/rtc-test.php" 2>/dev/null; then
+		printf 'MU-plugin:      copied to %s\n' "${mu_plugins_dir}"
+	else
+		printf 'WARNING: Could not copy rtc-test.php to %s\n' "${mu_plugins_dir}"
+		printf '  Copy it manually:\n'
+		printf '    cp "%s/rtc-test.php" "%s/"\n' "${SCRIPT_DIR}" "${mu_plugins_dir}"
+	fi
 
 	# Always use the dedicated rtctest user so setup controls the password.
 	# We generate the password here and either create or reset the account.
@@ -488,23 +498,30 @@ setup_wpcli() {
 		printf 'RTC:            could not update option -- verify in Settings > Writing\n'
 	fi
 
-	# Write rtc-test.env using explicit printf lines so there are no heredoc
-	# variable-expansion surprises and no dependency on quoting rules.
-	local config_file="${SCRIPT_DIR}/rtc-test.env"
-	{
-		printf '# Generated by: bash rtc-test.sh setup -- %s\n' "$(date)"
-		printf '# Run "bash rtc-test.sh teardown" to remove this file and the test post.\n'
-		printf '# Run "bash rtc-test.sh refresh-auth" if the nonce expires (~12h).\n'
-		printf 'WP_URL="%s"\n'         "${site_url}"
-		printf 'WP_USER="rtctest"\n'
-		printf 'WP_PASS="%s"\n'        "${rtctest_wp_pass}"
-		printf 'WP_NONCE="%s"\n'       "${nonce}"
-		printf 'WP_PATH="%s"\n'        "${wp_path}"
-		printf 'POST_ID="%s"\n'        "${post_id}"
-		printf '_RTC_POST_ID_AUTO=1\n'
-	} > "${config_file}"
+	# Write generated values to .env (or .env.example if .env does not exist yet).
+	# Strip any previous generated section first (from the marker line to EOF),
+	# then append the fresh block.
+	local env_file
+	env_file="$(resolve_env_file)"
+	local tmp
+	tmp="$(mktemp)"
+	awk '/Generated by setup/{found=1} !found{print}' "${env_file}" > "${tmp}" \
+		&& mv "${tmp}" "${env_file}"
 
-	printf '\nConfig written to %s\n' "${config_file}"
+	{
+		printf '\n# ── Generated by setup ─────────────────────────────────────────────────────\n'
+		printf '# The values below are written automatically by "bash rtc-test.sh setup".\n'
+		printf '# Do not edit them manually — re-run setup or refresh-auth to regenerate.\n'
+		printf '\n'
+		printf 'WP_URL="%s"\n'   "${site_url}"
+		printf 'WP_USER="rtctest"\n'
+		printf 'WP_PASS="%s"\n'  "${rtctest_wp_pass}"
+		printf 'WP_NONCE="%s"\n' "${nonce}"
+		printf 'POST_ID="%s"\n'  "${post_id}"
+		printf '_RTC_POST_ID_AUTO=1\n'
+	} >> "${env_file}"
+
+	printf '\nGenerated values written to %s\n' "${env_file}"
 	printf '\nNext steps:\n'
 	printf '  bash rtc-test.sh baseline\n'
 	printf '  bash rtc-test.sh single-idle\n'
@@ -514,15 +531,20 @@ setup_wpcli() {
 
 setup_manual() {
 	printf 'WP-CLI not available. Manual setup steps:\n\n'
-	printf '1. Enable RTC: WP Admin > Settings > Writing > "Enable early access to\n'
+	printf '1. Copy rtc-test.php to the site'"'"'s mu-plugins directory:\n'
+	printf '   cp rtc-test.php /path/to/wp-content/mu-plugins/\n\n'
+	printf '2. Enable RTC: WP Admin > Settings > Writing > "Enable early access to\n'
 	printf '   real-time collaboration"\n\n'
-	printf '2. Note a post ID for an existing editor-role user you want to test with.\n\n'
-	printf '3. Create %s/rtc-test.env:\n\n' "${SCRIPT_DIR}"
+	printf '3. Note a post ID for an existing editor-role user you want to test with.\n\n'
+	printf '4. Copy .env.example to .env and fill in the required values:\n\n'
+	printf '     cp .env.example .env\n\n'
+	printf '   Required values:\n'
 	printf '     WP_URL="%s"\n'      "${WP_URL}"
 	printf '     WP_USER="<login>"\n'
 	printf '     WP_PASS="<password>"\n'
+	printf '     WP_PATH="<absolute path to WordPress root>"\n'
 	printf '     POST_ID=<post_id>\n\n'
-	printf '4. Then run:\n'
+	printf '5. Then run:\n'
 	printf '     bash rtc-test.sh refresh-auth   # logs in and writes cookie jar + nonce\n\n'
 	printf 'After that, all test commands are available.\n'
 }
@@ -531,7 +553,8 @@ cmd_teardown() {
 	print_header "teardown"
 
 	# Re-source config so teardown works even if vars are not in the environment.
-	local config_file="${SCRIPT_DIR}/rtc-test.env"
+	local config_file
+	config_file="$(resolve_env_file)"
 	# shellcheck source=/dev/null
 	[ -f "${config_file}" ] && . "${config_file}"
 
@@ -543,14 +566,10 @@ cmd_teardown() {
 	fi
 
 	if command -v wp >/dev/null 2>&1; then
-		local wp_path="${WP_PATH:-$(find_wp_root)}"
 		local WP_FLAGS=()
 		[ "$(id -u)" = "0" ] && WP_FLAGS+=( "--allow-root" )
-		[ -n "${WP_URL:-}" ] && WP_FLAGS+=( "--url=${WP_URL}" )
-		# Only add --path if WP-CLI doesn't already work without it.
-		if ! wp "${WP_FLAGS[@]}" core version >/dev/null 2>&1 && [ -n "${wp_path}" ]; then
-			WP_FLAGS+=( "--path=${wp_path}" )
-		fi
+		[ -n "${WP_URL:-}" ]  && WP_FLAGS+=( "--url=${WP_URL}" )
+		[ -n "${WP_PATH:-}" ] && WP_FLAGS+=( "--path=${WP_PATH}" )
 
 		if [ "${_RTC_POST_ID_AUTO:-0}" = "1" ] && [ -n "${POST_ID:-}" ]; then
 			printf 'Deleting test post %s...\n' "${POST_ID}"
@@ -559,9 +578,13 @@ cmd_teardown() {
 		fi
 	fi
 
+	# Strip the generated section from the env file, leaving user config intact.
 	if [ -f "${config_file}" ]; then
-		rm "${config_file}"
-		printf 'Removed %s\n' "${config_file}"
+		local tmp
+		tmp="$(mktemp)"
+		awk '/Generated by setup/{found=1} !found{print}' "${config_file}" > "${tmp}" \
+			&& mv "${tmp}" "${config_file}"
+		printf 'Stripped generated values from %s\n' "${config_file}"
 	fi
 
 	printf '\nTeardown complete.\n'
@@ -569,19 +592,20 @@ cmd_teardown() {
 
 cmd_refresh_auth() {
 	print_header "refresh-auth"
-	local config_file="${SCRIPT_DIR}/rtc-test.env"
-	[ -f "${config_file}" ] || die "No rtc-test.env found. Run: bash rtc-test.sh setup"
+	local config_file
+	config_file="$(resolve_env_file)"
+	[ -f "${config_file}" ] || die "No .env or .env.example found. Run: bash rtc-test.sh setup"
 	# shellcheck source=/dev/null
 	. "${config_file}"
-	[ -n "${WP_PASS:-}" ]  || die "WP_PASS not set in rtc-test.env."
-	[ -n "${WP_USER:-}" ]  || die "WP_USER not set in rtc-test.env."
-	[ -n "${WP_URL:-}" ]   || die "WP_URL not set in rtc-test.env."
+	[ -n "${WP_PASS:-}" ]  || die "WP_PASS not set. Run setup first, or add it to ${config_file}."
+	[ -n "${WP_USER:-}" ]  || die "WP_USER not set. Run setup first, or add it to ${config_file}."
+	[ -n "${WP_URL:-}" ]   || die "WP_URL not set. Run setup first, or add it to ${config_file}."
 
 	local jar="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"
 	rm -f "${jar}"
 	printf 'Logging in as %s...\n' "${WP_USER}"
 	do_login "${WP_USER}" "${WP_PASS}" "${WP_URL}" "${jar}" \
-		|| die "Cookie login failed. Check WP_URL and WP_PASS in rtc-test.env."
+		|| die "Cookie login failed. Check WP_URL and WP_PASS in ${config_file}."
 	printf 'Cookies:    obtained (%s)\n' "${jar}"
 
 	local nonce
@@ -589,7 +613,7 @@ cmd_refresh_auth() {
 	[ -n "${nonce}" ] || die "Empty nonce. Is rtc-test.php deployed and active?"
 	printf 'Nonce:      obtained (%s...)\n' "${nonce:0:8}"
 
-	# Update WP_NONCE in rtc-test.env in-place.
+	# Update WP_NONCE in the env file in-place.
 	# Use a temp file instead of sed -i to avoid BSD/GNU portability issues.
 	local tmp
 	tmp=$(mktemp)
@@ -1704,7 +1728,7 @@ case "${COMMAND}" in
 		printf 'Usage: %s <command>\n\n' "$0"
 		printf 'Commands:\n'
 		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
-		printf '  teardown              Delete test post, remove cookie jar and rtc-test.env\n'
+		printf '  teardown              Delete test post, remove cookie jar, strip generated .env section\n'
 		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
 		printf '  baseline              Measure ambient WP REST overhead (run first)\n'
 		printf '  single-idle           1 client, POLLS polls, no updates\n'
@@ -1727,13 +1751,13 @@ case "${COMMAND}" in
 		printf '  capture-sanitize <f>  Strip responses/awareness from a fixture; print to stdout\n'
 		printf '  capture-drop [<id>]   Delete a session (or entire table if no ID given)\n'
 		printf '  replay <fixture.json> Replay a captured session JSON against the endpoint\n'
-		printf '\nEnvironment variables (or set in rtc-test.env after running setup):\n'
+		printf '\nEnvironment variables (set in .env, or pass directly; .env.example shows all options):\n'
 		printf '  WP_URL        WordPress site URL (default: http://localhost)\n'
 		printf '  WP_USER       WordPress username (set by setup to "rtctest")\n'
 		printf '  WP_PASS       WordPress login password (set by setup, used by refresh-auth)\n'
 		printf '  WP_COOKIE_JAR Path to cookie jar file (set by setup)\n'
 		printf '  WP_NONCE      WP REST API nonce (~12h TTL; refresh with refresh-auth)\n'
-		printf '  WP_PATH       Path to WordPress root for WP-CLI (auto-detected by setup)\n'
+		printf '  WP_PATH       Absolute path to WordPress root; required by setup\n'
 		printf '  POST_ID       Post ID with edit permission (default: 1)\n'
 		printf '  POLLS         Polls per scenario (default: 10)\n'
 		printf '  POLL_DELAY    Seconds between polls per client (default: 1; 0=stress/immediate re-poll)\n'
