@@ -219,11 +219,12 @@ do_get_nonce() {
 # Posts to the RTC endpoint with the given scenario label.
 # Test metadata is sent as both request headers and query parameters so the
 # plugin can receive it even when a reverse proxy strips custom headers.
+# _wpnonce is sent in the URL as a fallback in case X-WP-Nonce is also stripped.
 # Prints the raw response body followed by __HTTP_STATUS__:NNN on its own line.
 rtc_post() {
 	local scenario="$1"
 	local body="$2"
-	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}"
+	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}&_wpnonce=${WP_NONCE}"
 	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
 	curl "${BASE_CURL_OPTS[@]}" \
 		-H "X-RTC-Scenario: ${scenario}" \
@@ -240,7 +241,7 @@ rtc_post() {
 rtc_post_timed() {
 	local scenario="$1"
 	local body="$2"
-	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}"
+	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}&_wpnonce=${WP_NONCE}"
 	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
 	local timing
 	timing=$(curl "${BASE_CURL_OPTS[@]}" \
@@ -248,6 +249,7 @@ rtc_post_timed() {
 		-X POST "${url}" \
 		-d "${body}" \
 		-w '\n__CURL_TIME__:%{time_namelookup}:%{time_connect}:%{time_appconnect}:%{time_pretransfer}:%{time_starttransfer}:%{time_total}' \
+		-D /tmp/rtctest_last_headers.txt \
 		-o /tmp/rtctest_last_response.json 2>&1) || true
 	cat /tmp/rtctest_last_response.json
 	# Parse the six timing fields and derive the four useful deltas.
@@ -1001,6 +1003,31 @@ cmd_single_idle() {
 				printf '  the correct metric to compare across environments.\n'
 			fi
 			check_rtc_response "${resp_json}" "single-idle" || return 1
+
+			# Verify the plugin's monitoring hook activated and data was written.
+			# X-RTC-Test-Active: hook ran; X-RTC-DB-Insert: row was inserted.
+			local _hook_active=0 _db_inserted=0 _db_error=""
+			if [ -f /tmp/rtctest_last_headers.txt ]; then
+				grep -qi 'x-rtc-test-active' /tmp/rtctest_last_headers.txt && _hook_active=1
+				grep -qi 'x-rtc-db-insert: 1' /tmp/rtctest_last_headers.txt && _db_inserted=1
+				_db_error=$(grep -i 'x-rtc-db-error:' /tmp/rtctest_last_headers.txt \
+					| head -1 | sed 's/.*x-rtc-db-error: *//i' | tr -d '\r' \
+					| python3 -c 'import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))' \
+					2>/dev/null || true)
+			fi
+			if [ "${_hook_active}" = "1" ] && [ "${_db_inserted}" = "1" ]; then
+				printf 'Plugin logging: ACTIVE (hook ran, row inserted)\n'
+			elif [ "${_hook_active}" = "1" ]; then
+				printf 'Plugin logging: HOOK RAN but DB INSERT FAILED.\n'
+				[ -n "${_db_error}" ] && printf '  MySQL error: %s\n' "${_db_error}"
+				printf '  Check the PHP error log on the server for details.\n'
+			else
+				printf 'Plugin logging: NOT ACTIVE -- no X-RTC-Test-Active header in response.\n'
+				printf '  rtctest_post_dispatch did not run. Possible causes:\n'
+				printf '  1. rtc-test.php in mu-plugins is outdated (re-run setup or apply-approach).\n'
+				printf '  2. Proxy is blocking both headers AND query params from reaching PHP.\n'
+				printf '  3. MU plugin is not loaded (check wp-content/mu-plugins/rtc-test.php).\n'
+			fi
 		fi
 
 		local new_cursor

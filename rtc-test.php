@@ -30,7 +30,7 @@ unset( $_rtctest_ru );
 
 define( 'RTC_TEST_ENV_OPTION',        'rtc_test_env' );
 define( 'RTC_TEST_CONCURRENT_OPTION', 'rtc_test_concurrent' );
-define( 'RTC_TEST_DB_VERSION',        '2' );
+define( 'RTC_TEST_DB_VERSION',        '3' );
 define( 'RTC_TEST_LOG_MAX',           500 );
 define( 'RTC_TEST_REQUEST_HEADER',    'HTTP_X_RTC_TEST' );
 define( 'RTC_TEST_SCENARIO_HEADER',   'HTTP_X_RTC_SCENARIO' );
@@ -46,44 +46,67 @@ function rtctest_log_table() {
 }
 
 function rtctest_ensure_table() {
+	global $wpdb;
+	$table = rtctest_log_table();
+
+	// Fast path: version option matches AND the table physically exists with the
+	// correct schema.  We spot-check the 'approach' column (added in version 3)
+	// to catch tables left behind by an older version of this plugin.
 	if ( get_option( 'rtctest_db_version' ) === RTC_TEST_DB_VERSION ) {
-		return;
+		$col = $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'approach'" ); // phpcs:ignore
+		if ( null !== $col ) {
+			return; // Table exists and has the current schema.
+		}
 	}
 
-	global $wpdb;
-	$table           = rtctest_log_table();
+	// Schema is missing or out of date.  Drop and recreate so the schema is
+	// always correct.  This table holds only test measurements — correctness of
+	// the schema matters more than preserving rows from an incompatible version.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.SchemaChange
+	$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" ); // phpcs:ignore
+	delete_option( 'rtctest_db_version' );
+
 	$charset_collate = $wpdb->get_charset_collate();
 
-	$sql = "CREATE TABLE IF NOT EXISTS {$table} (
-  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  ts int(11) NOT NULL DEFAULT 0,
-  approach varchar(60) NOT NULL DEFAULT '',
-  scenario varchar(100) NOT NULL DEFAULT 'unknown',
-  ms float NOT NULL DEFAULT 0,
-  total_ms float NOT NULL DEFAULT 0,
-  cpu_ms float NOT NULL DEFAULT 0,
-  total_cpu_ms float NOT NULL DEFAULT 0,
-  db_queries int(11) NOT NULL DEFAULT 0,
-  db_time_ms float NOT NULL DEFAULT 0,
-  memory_delta bigint(20) NOT NULL DEFAULT 0,
-  peak_memory bigint(20) NOT NULL DEFAULT 0,
-  status int(11) NOT NULL DEFAULT 200,
-  rooms int(11) NOT NULL DEFAULT 0,
-  updates_in int(11) NOT NULL DEFAULT 0,
-  updates_out int(11) NOT NULL DEFAULT 0,
-  response_bytes int(11) NOT NULL DEFAULT 0,
-  awareness_count int(11) NOT NULL DEFAULT 0,
-  should_compact tinyint(1) NOT NULL DEFAULT 0,
-  total_updates int(11) NOT NULL DEFAULT 0,
-  concurrent int(11) NOT NULL DEFAULT 0,
-  PRIMARY KEY  (id),
-  KEY approach_scenario (approach,scenario),
-  KEY ts (ts)
-) {$charset_collate};";
+	// Use a direct CREATE TABLE query instead of dbDelta() to avoid dbDelta()'s
+	// strict SQL-formatting requirements, which can cause silent failures.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.SchemaChange
+	$wpdb->query(
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		"CREATE TABLE `{$table}` (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			ts int(11) NOT NULL DEFAULT 0,
+			approach varchar(60) NOT NULL DEFAULT '',
+			scenario varchar(100) NOT NULL DEFAULT 'unknown',
+			ms float NOT NULL DEFAULT 0,
+			total_ms float NOT NULL DEFAULT 0,
+			cpu_ms float NOT NULL DEFAULT 0,
+			total_cpu_ms float NOT NULL DEFAULT 0,
+			db_queries int(11) NOT NULL DEFAULT 0,
+			db_time_ms float NOT NULL DEFAULT 0,
+			memory_delta bigint(20) NOT NULL DEFAULT 0,
+			peak_memory bigint(20) NOT NULL DEFAULT 0,
+			status int(11) NOT NULL DEFAULT 200,
+			rooms int(11) NOT NULL DEFAULT 0,
+			updates_in int(11) NOT NULL DEFAULT 0,
+			updates_out int(11) NOT NULL DEFAULT 0,
+			response_bytes int(11) NOT NULL DEFAULT 0,
+			awareness_count int(11) NOT NULL DEFAULT 0,
+			should_compact tinyint(1) NOT NULL DEFAULT 0,
+			total_updates int(11) NOT NULL DEFAULT 0,
+			concurrent int(11) NOT NULL DEFAULT 0,
+			PRIMARY KEY (id),
+			KEY approach_scenario (approach, scenario),
+			KEY ts (ts)
+		) {$charset_collate}"
+	);
 
-	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-	dbDelta( $sql );
-	update_option( 'rtctest_db_version', RTC_TEST_DB_VERSION, true );
+	// Only mark the version current if the table was actually created.
+	if ( null !== $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'approach'" ) ) { // phpcs:ignore
+		update_option( 'rtctest_db_version', RTC_TEST_DB_VERSION, true );
+	} else {
+		error_log( '[rtctest] Failed to create table ' . $table . ': ' . $wpdb->last_error );
+	}
 }
 
 function rtctest_drop_table() {
@@ -103,7 +126,12 @@ add_filter( 'rest_pre_dispatch',  'rtctest_pre_dispatch',  10, 3 );
 add_filter( 'rest_post_dispatch', 'rtctest_post_dispatch', 10, 3 );
 
 function rtctest_pre_dispatch( $result, $server, $request ) {
+	// Accept the tag from three sources, in order of reliability:
+	//   1. HTTP header (blocked by some reverse proxies)
+	//   2. PHP $_GET superglobal (never filtered by WordPress)
+	//   3. WP_REST_Request::get_param() (goes through WP param processing)
 	$tagged = isset( $_SERVER[ RTC_TEST_REQUEST_HEADER ] )
+	       || '1' === ( $_GET['_rtctest'] ?? '' )
 	       || '1' === (string) $request->get_param( '_rtctest' );
 	if ( ! $tagged ) {
 		return $result;
@@ -186,35 +214,64 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 	$total_updates  = isset( $first_room_out['total_updates'] ) ? (int) $first_room_out['total_updates'] : 0;
 	$response_bytes = strlen( wp_json_encode( $data ) );
 
-	$wpdb->insert(
-		rtctest_log_table(),
-		array(
-			'ts'              => time(),
-			'approach'        => $approach,
-			'scenario'        => $scenario,
-			'ms'              => $wall_ms,
-			'total_ms'        => $total_ms,
-			'cpu_ms'          => $cpu_ms,
-			'total_cpu_ms'    => $total_cpu_ms,
-			'db_queries'      => $db_queries,
-			'db_time_ms'      => $db_time_ms,
-			'memory_delta'    => $memory_delta,
-			'peak_memory'     => memory_get_peak_usage( true ),
-			'status'          => $response->get_status(),
-			'rooms'           => count( $rooms_in ),
-			'updates_in'      => $updates_in,
-			'updates_out'     => $updates_out,
-			'response_bytes'  => $response_bytes,
-			'awareness_count' => $awareness_count,
-			'should_compact'  => $should_compact ? 1 : 0,
-			'total_updates'   => $total_updates,
-			'concurrent'      => $GLOBALS['rtctest_concurrent_at_start'],
-		),
-		array(
-			'%d', '%s', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
-			'%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d',
-		)
+	// Build the row data and format array once so we can retry if the first
+	// insert fails (e.g. because the table was dropped while the db_version
+	// option remained set, causing rtctest_ensure_table() to skip creation).
+	$row_data = array(
+		'ts'              => time(),
+		'approach'        => $approach,
+		'scenario'        => $scenario,
+		'ms'              => $wall_ms,
+		'total_ms'        => $total_ms,
+		'cpu_ms'          => $cpu_ms,
+		'total_cpu_ms'    => $total_cpu_ms,
+		'db_queries'      => $db_queries,
+		'db_time_ms'      => $db_time_ms,
+		'memory_delta'    => $memory_delta,
+		'peak_memory'     => memory_get_peak_usage( true ),
+		'status'          => $response->get_status(),
+		'rooms'           => count( $rooms_in ),
+		'updates_in'      => $updates_in,
+		'updates_out'     => $updates_out,
+		'response_bytes'  => $response_bytes,
+		'awareness_count' => $awareness_count,
+		'should_compact'  => $should_compact ? 1 : 0,
+		'total_updates'   => $total_updates,
+		'concurrent'      => $GLOBALS['rtctest_concurrent_at_start'],
 	);
+	$row_fmt = array(
+		'%d', '%s', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
+		'%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d',
+	);
+
+	$inserted  = $wpdb->insert( rtctest_log_table(), $row_data, $row_fmt );
+	$db_error  = $wpdb->last_error;
+
+	if ( false === $inserted ) {
+		// Insert failed — most likely the table was dropped while the
+		// rtctest_db_version option remained set (so ensure_table was a no-op).
+		// Reset the version flag, recreate the table, and retry once.
+		error_log( '[rtctest] insert failed: ' . $db_error . ' — recreating table.' );
+		delete_option( 'rtctest_db_version' );
+		rtctest_ensure_table();
+		$inserted = $wpdb->insert( rtctest_log_table(), $row_data, $row_fmt );
+		$db_error = $wpdb->last_error;
+		if ( false === $inserted ) {
+			error_log( '[rtctest] insert retry failed: ' . $db_error );
+		}
+	}
+
+	// Diagnostic response headers — visible in curl -D output for debugging:
+	//   X-RTC-Test-Active: 1  → hook executed (always set when we reach here)
+	//   X-RTC-DB-Insert:   1  → row was written; 0 → insert failed
+	//   X-RTC-DB-Error:    …  → MySQL error on insert failure (URL-encoded)
+	if ( $response instanceof WP_REST_Response ) {
+		$response->header( 'X-RTC-Test-Active', '1' );
+		$response->header( 'X-RTC-DB-Insert', false !== $inserted ? '1' : '0' );
+		if ( false === $inserted && '' !== $db_error ) {
+			$response->header( 'X-RTC-DB-Error', rawurlencode( substr( $db_error, 0, 300 ) ) );
+		}
+	}
 
 	unset(
 		$GLOBALS['rtctest_wall_start'],
