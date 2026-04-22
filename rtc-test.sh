@@ -110,7 +110,6 @@ N_CLIENTS="${N_CLIENTS:-3}"
 DURATION="${DURATION:-30}"      # Seconds to run for sustain command
 UPDATE_SIZE="${UPDATE_SIZE:-small}"
 APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
-CURRENT_APPROACH="${CURRENT_APPROACH:-}"  # Approach currently patched in (written by apply-approach)
 
 # -------------------------------------------------------------------------
 # Deterministic test constants
@@ -498,16 +497,6 @@ _clear_rtc_data() {
 	' 2>/dev/null || printf '  WARNING: Could not clear RTC data via WP-CLI.\n'
 }
 
-# _write_current_approach APPROACH -- records the active approach in the env file.
-_write_current_approach() {
-	local approach="$1"
-	local env_file
-	env_file="$(resolve_env_file)"
-	local tmp
-	tmp="$(mktemp)"
-	grep -v '^CURRENT_APPROACH=' "${env_file}" > "${tmp}" && mv "${tmp}" "${env_file}"
-	printf 'CURRENT_APPROACH="%s"\n' "${approach}" >> "${env_file}"
-}
 
 cmd_apply_approach() {
 	local approach="${1:-}"
@@ -526,48 +515,63 @@ cmd_apply_approach() {
 	local WP_FLAGS=()
 	_build_wp_flags
 
-	# Step 1: Reverse the current patch if one is applied.
-	local current="${CURRENT_APPROACH:-}"
-	if [ -n "${current}" ] && [ "${current}" != "post-meta" ]; then
-		local current_patch
-		current_patch="$(approach_patch_file "${current}")"
-		if [ -n "${current_patch}" ] && [ -f "${current_patch}" ]; then
-			printf 'Reversing patch for %s...\n' "${current}"
-			patch --dry-run -R -p2 -d "${WP_PATH}" < "${current_patch}" >/dev/null 2>&1 \
-				|| die "Reverse dry-run failed for ${current}. Files may have diverged; inspect manually."
-			patch -R -p2 -d "${WP_PATH}" < "${current_patch}" \
-				|| die "Failed to reverse patch for ${current}."
-			printf 'Reversed.\n'
-		fi
-	fi
+	# Step 1: Reset to a clean nightly build so every approach starts from identical files.
+	printf 'Downloading WordPress nightly...\n'
+	wp "${WP_FLAGS[@]}" core download --force --version=nightly --skip-content \
+		|| die "Failed to download WordPress nightly."
 
-	# Step 2: If the outgoing approach added a table, drop it now that the schema is reverted.
-	if approach_has_schema_change "${current:-}"; then
-		local table_prefix
-		table_prefix="$(wp "${WP_FLAGS[@]}" eval 'global $wpdb; echo $wpdb->prefix;' 2>/dev/null)"
-		printf 'Dropping %scollaboration table...\n' "${table_prefix}"
-		wp "${WP_FLAGS[@]}" db query \
-			"DROP TABLE IF EXISTS \`${table_prefix}collaboration\`;" 2>/dev/null \
-			&& printf 'Dropped.\n' \
-			|| printf 'WARNING: Could not drop %scollaboration.\n' "${table_prefix}"
-	fi
+	# Step 2: Re-copy the MU-plugin (nightly download does not touch wp-content, but
+	# re-copying ensures the plugin version matches this repo).
+	local mu_dir="${WP_PATH}/wp-content/mu-plugins"
+	mkdir -p "${mu_dir}"
+	cp "${SCRIPT_DIR}/rtc-test.php" "${mu_dir}/rtc-test.php" \
+		&& printf 'MU-plugin:      re-copied\n' \
+		|| printf 'WARNING: Could not re-copy MU-plugin.\n'
 
-	# Step 3: Apply the new approach's patch.
+	# Step 3: Baseline DB upgrade (nightly may carry a newer schema than what is in the DB).
+	wp "${WP_FLAGS[@]}" core update-db >/dev/null 2>&1 || true
+
+	# Step 4: Apply the approach's patch (post-meta is the nightly baseline, no patch needed).
 	local new_patch
 	new_patch="$(approach_patch_file "${approach}")"
 	if [ -n "${new_patch}" ]; then
 		[ -f "${new_patch}" ] || die "Patch file not found: ${new_patch}"
+
+		# Remove any files that this patch would create fresh.  wp core download
+		# does not delete files that are absent from the nightly package, so files
+		# added by a previous approach's patch would still be on disk and cause
+		# patch to detect an "already exists" conflict.
+		# New-file hunks have "--- /dev/null" as their source; the destination line
+		# is "+++ b/src/<path>" which, with -p2, maps to <path> under WP_PATH.
+		local _del_count=0
+		while IFS= read -r _rel; do
+			local _target="${WP_PATH}/${_rel}"
+			if [ -f "${_target}" ]; then
+				rm -f "${_target}"
+				_del_count=$(( _del_count + 1 ))
+			fi
+		done < <(grep -A1 '^--- /dev/null' "${new_patch}" \
+		         | grep '^\+\+\+ ' \
+		         | sed 's|^\+\+\+ b/src/||')
+		[ "${_del_count}" -gt 0 ] && \
+			printf 'Removed %d file(s) added by a previous patch.\n' "${_del_count}"
+
 		printf 'Applying patch for %s...\n' "${approach}"
-		patch --dry-run -p2 -d "${WP_PATH}" < "${new_patch}" >/dev/null 2>&1 \
-			|| die "Patch dry-run failed. Files may not match the expected RC2 state."
-		patch -p2 -d "${WP_PATH}" < "${new_patch}" \
+		local _fwd_dry
+		if ! _fwd_dry=$(patch --dry-run --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" 2>&1); then
+			printf '%s\n' "${_fwd_dry}"
+			die "Patch dry-run failed. The patch context does not match the nightly files.
+  Check which file/hunk is listed above."
+		fi
+		patch --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" \
 			|| die "Patch failed. WordPress files may be in an inconsistent state."
 		printf 'Patch applied.\n'
 	else
-		printf 'Approach %s is the RC2 baseline — no patch needed.\n' "${approach}"
+		printf 'Approach %s is the nightly baseline — no patch needed.\n' "${approach}"
 	fi
 
-	# Step 4: Run DB upgrade if the new approach introduces a schema change.
+	# Step 5: Run DB upgrade again if the approach introduces a schema change (adds the
+	# wp_collaboration table).  wp_is_collaboration_enabled() requires db_version >= 61841.
 	if approach_has_schema_change "${approach}"; then
 		printf 'Running database upgrade (adds collaboration table)...\n'
 		wp "${WP_FLAGS[@]}" core update-db || die "Database upgrade failed."
@@ -580,21 +584,19 @@ cmd_apply_approach() {
 		fi
 	fi
 
-	# Step 5: Clear all RTC data so this run starts from a clean state.
+	# Step 6: Clear all RTC data so this run starts from a clean state.
 	_clear_rtc_data "${WP_FLAGS[@]}"
 
-	# Step 6: Flush the object cache so stale awareness from the previous approach is gone.
+	# Step 7: Flush the object cache.
 	wp "${WP_FLAGS[@]}" cache flush 2>/dev/null \
 		&& printf 'Object cache:   flushed\n' \
 		|| printf 'Object cache:   no external cache to flush\n'
 
-	# Step 7: Ensure RTC is enabled.
+	# Step 8: Ensure RTC is enabled.
 	wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1 \
 		&& printf 'RTC:            enabled\n' \
 		|| printf 'WARNING: Could not enable RTC. Verify in Settings > Writing.\n'
 
-	# Step 8: Record the active approach.
-	_write_current_approach "${approach}"
 	printf '\nApproach "%s" is ready. Run tests with APPROACH="%s".\n' \
 		"${approach}" "${approach}"
 }
@@ -604,44 +606,41 @@ cmd_reset_approach() {
 	command -v wp >/dev/null 2>&1 || die "WP-CLI is required for reset-approach."
 	[ -n "${WP_PATH:-}" ] || die "WP_PATH is not set. Add it to your .env file."
 
-	local current="${CURRENT_APPROACH:-}"
-	if [ -z "${current}" ] || [ "${current}" = "post-meta" ]; then
-		printf 'Already at RC2 baseline (post-meta). Nothing to reverse.\n'
-		return 0
-	fi
-
 	local WP_FLAGS=()
 	_build_wp_flags
 
-	local current_patch
-	current_patch="$(approach_patch_file "${current}")"
-	if [ -n "${current_patch}" ] && [ -f "${current_patch}" ]; then
-		printf 'Reversing patch for %s...\n' "${current}"
-		patch --dry-run -R -p2 -d "${WP_PATH}" < "${current_patch}" >/dev/null 2>&1 \
-			|| die "Reverse dry-run failed. Inspect ${WP_PATH} manually."
-		patch -R -p2 -d "${WP_PATH}" < "${current_patch}" \
-			|| die "Failed to reverse patch."
-		printf 'Reversed.\n'
-	fi
+	printf 'Downloading WordPress nightly...\n'
+	wp "${WP_FLAGS[@]}" core download --force --version=nightly --skip-content \
+		|| die "Failed to download WordPress nightly."
 
-	if approach_has_schema_change "${current}"; then
-		local table_prefix
-		table_prefix="$(wp "${WP_FLAGS[@]}" eval 'global $wpdb; echo $wpdb->prefix;' 2>/dev/null)"
-		printf 'Dropping %scollaboration table...\n' "${table_prefix}"
-		wp "${WP_FLAGS[@]}" db query \
-			"DROP TABLE IF EXISTS \`${table_prefix}collaboration\`;" 2>/dev/null \
-			&& printf 'Dropped.\n' \
-			|| printf 'WARNING: Could not drop table.\n'
-	fi
+	# Remove any files added by approach patches — wp core download leaves them behind.
+	local _patch_file _del_count=0 _rel _target
+	for _patch_file in "${SCRIPT_DIR}/patches/"*.patch; do
+		[ -f "${_patch_file}" ] || continue
+		while IFS= read -r _rel; do
+			_target="${WP_PATH}/${_rel}"
+			if [ -f "${_target}" ]; then
+				rm -f "${_target}"
+				_del_count=$(( _del_count + 1 ))
+			fi
+		done < <(grep -A1 '^--- /dev/null' "${_patch_file}" \
+		         | grep '^\+\+\+ ' \
+		         | sed 's|^\+\+\+ b/src/||')
+	done
+	[ "${_del_count}" -gt 0 ] && \
+		printf 'Removed %d file(s) added by approach patches.\n' "${_del_count}"
 
-	_clear_rtc_data "${WP_FLAGS[@]}"
+	local mu_dir="${WP_PATH}/wp-content/mu-plugins"
+	mkdir -p "${mu_dir}"
+	cp "${SCRIPT_DIR}/rtc-test.php" "${mu_dir}/rtc-test.php" \
+		&& printf 'MU-plugin:      re-copied\n' \
+		|| printf 'WARNING: Could not re-copy MU-plugin.\n'
 
+	wp "${WP_FLAGS[@]}" core update-db >/dev/null 2>&1 || true
 	wp "${WP_FLAGS[@]}" cache flush 2>/dev/null || true
-
 	wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1 || true
 
-	_write_current_approach "post-meta"
-	printf '\nReset to RC2 baseline (post-meta).\n'
+	printf '\nReset to clean nightly.\n'
 }
 
 # -------------------------------------------------------------------------
@@ -2269,8 +2268,8 @@ case "${COMMAND}" in
 		printf 'Commands:\n'
 		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
 		printf '  ensure-wp-version     Verify WordPress %s is installed; update via WP-CLI if not\n' "${REQUIRED_WP_VERSION}"
-		printf '  apply-approach <name> Patch WP files for the named approach, reset RTC data, run update-db if needed\n'
-		printf '  reset-approach        Reverse the current patch and return to the RC2 baseline\n'
+		printf '  apply-approach <name> Download nightly, apply approach patch, clear RTC data\n'
+		printf '  reset-approach        Download nightly and return to a clean unpatched state\n'
 		printf '  teardown              Delete test post, remove cookie jar, strip generated .env section\n'
 		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
 		printf '  baseline              Measure ambient WP REST overhead (run first)\n'
@@ -2311,7 +2310,6 @@ case "${COMMAND}" in
 		printf '  DURATION      Seconds to run for sustain (default: 30)\n'
 		printf '  UPDATE_SIZE   small|medium|large payload (default: small)\n'
 		printf '  APPROACH              Storage approach label written to the log (e.g. post-meta, custom-table)\n'
-		printf '  CURRENT_APPROACH      Approach currently patched in (written automatically by apply-approach)\n'
 		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
 		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'
 		exit 1
