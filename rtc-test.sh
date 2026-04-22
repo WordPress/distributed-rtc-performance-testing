@@ -425,6 +425,19 @@ setup_wpcli() {
 			printf 'from the host running this script.\n' ;;
 	esac
 
+	# Copy the MU-plugin now, before login/nonce steps that depend on it being active.
+	local wp_content_dir mu_plugins_dir
+	wp_content_dir="$(wp "${WP_FLAGS[@]}" eval 'echo WP_CONTENT_DIR;' 2>/dev/null)"
+	mu_plugins_dir="${wp_content_dir}/mu-plugins"
+	if mkdir -p "${mu_plugins_dir}" 2>/dev/null \
+			&& cp "${SCRIPT_DIR}/rtc-test.php" "${mu_plugins_dir}/rtc-test.php" 2>/dev/null; then
+		printf 'MU-plugin:      copied to %s\n' "${mu_plugins_dir}"
+	else
+		printf 'WARNING: Could not copy rtc-test.php to %s\n' "${mu_plugins_dir}"
+		printf '  Copy it manually:\n'
+		printf '    cp "%s/rtc-test.php" "%s/"\n' "${SCRIPT_DIR}" "${mu_plugins_dir}"
+	fi
+
 	# Always use the dedicated rtctest user so setup controls the password.
 	# We generate the password here and either create or reset the account.
 	local rtctest_wp_pass
@@ -477,19 +490,6 @@ setup_wpcli() {
 		--porcelain 2>/dev/null)" \
 		|| die "Failed to create test post."
 	printf 'Test post ID:   %s\n' "${post_id}"
-
-	# Copy the MU-plugin to the site's mu-plugins directory.
-	local wp_content_dir mu_plugins_dir
-	wp_content_dir="$(wp "${WP_FLAGS[@]}" eval 'echo WP_CONTENT_DIR;' 2>/dev/null)"
-	mu_plugins_dir="${wp_content_dir}/mu-plugins"
-	if mkdir -p "${mu_plugins_dir}" 2>/dev/null \
-			&& cp "${SCRIPT_DIR}/rtc-test.php" "${mu_plugins_dir}/rtc-test.php" 2>/dev/null; then
-		printf 'MU-plugin:      copied to %s\n' "${mu_plugins_dir}"
-	else
-		printf 'WARNING: Could not copy rtc-test.php to %s\n' "${mu_plugins_dir}"
-		printf '  Copy it manually:\n'
-		printf '    cp "%s/rtc-test.php" "%s/"\n' "${SCRIPT_DIR}" "${mu_plugins_dir}"
-	fi
 
 	# Enable Real Time Collaboration.
 	if wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1; then
