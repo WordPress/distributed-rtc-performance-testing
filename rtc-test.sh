@@ -102,7 +102,7 @@ WP_PASS="${WP_PASS:-}"                                            # WP login pas
 WP_COOKIE_JAR="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"  # cookie jar path (set by setup)
 WP_NONCE="${WP_NONCE:-}"                                          # wp_rest nonce (set by setup, ~12h TTL)
 WP_PATH="${WP_PATH:-}"       # Absolute path to WordPress root; required by setup
-REQUIRED_WP_VERSION="${REQUIRED_WP_VERSION:-7.0-RC2}"   # WordPress version required by these tests
+REQUIRED_WP_VERSION="${REQUIRED_WP_VERSION:-nightly}"   # WordPress version required by these tests
 POST_ID="${POST_ID:-1}"
 POLLS="${POLLS:-10}"
 POLL_DELAY="${POLL_DELAY:-1}"   # Seconds between polls per client (0 = immediate re-poll / stress mode)
@@ -217,13 +217,17 @@ do_get_nonce() {
 
 # rtc_post SCENARIO JSON_BODY
 # Posts to the RTC endpoint with the given scenario label.
+# Test metadata is sent as both request headers and query parameters so the
+# plugin can receive it even when a reverse proxy strips custom headers.
 # Prints the raw response body followed by __HTTP_STATUS__:NNN on its own line.
 rtc_post() {
 	local scenario="$1"
 	local body="$2"
+	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}"
+	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
 	curl "${BASE_CURL_OPTS[@]}" \
 		-H "X-RTC-Scenario: ${scenario}" \
-		-X POST "${RTC_ENDPOINT}" \
+		-X POST "${url}" \
 		-w '\n__HTTP_STATUS__:%{http_code}' \
 		-d "${body}"
 }
@@ -236,10 +240,12 @@ rtc_post() {
 rtc_post_timed() {
 	local scenario="$1"
 	local body="$2"
+	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}"
+	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
 	local timing
 	timing=$(curl "${BASE_CURL_OPTS[@]}" \
 		-H "X-RTC-Scenario: ${scenario}" \
-		-X POST "${RTC_ENDPOINT}" \
+		-X POST "${url}" \
 		-d "${body}" \
 		-w '\n__CURL_TIME__:%{time_namelookup}:%{time_connect}:%{time_appconnect}:%{time_pretransfer}:%{time_starttransfer}:%{time_total}' \
 		-o /tmp/rtctest_last_response.json 2>&1) || true
@@ -386,11 +392,28 @@ print_header() {
 
 # ensure_wp_version -- verify the installed WordPress version matches
 # REQUIRED_WP_VERSION; download and install it via WP-CLI if not.
+# When REQUIRED_WP_VERSION is "nightly", any alpha/beta/RC build is accepted
+# and a fresh nightly is only downloaded if nothing is installed yet.
 # Pass all WP-CLI flags as arguments (e.g. --path=... --allow-root --url=...).
 ensure_wp_version() {
 	local current
 	current="$(wp "$@" core version 2>/dev/null)" \
 		|| { printf 'ERROR: Could not read WordPress version via WP-CLI.\n'; return 1; }
+
+	if [ "${REQUIRED_WP_VERSION}" = "nightly" ]; then
+		# Any pre-release build satisfies the nightly requirement.  Re-download
+		# only if the site reports no version at all.
+		if [ -n "${current}" ]; then
+			printf 'WordPress:      %s (nightly or later accepted)\n' "${current}"
+			return 0
+		fi
+		printf 'WordPress:      not installed. Downloading nightly...\n'
+		wp "$@" core download --version=nightly --skip-content \
+			|| { printf 'ERROR: WP nightly download failed.\n'; return 1; }
+		wp "$@" core update-db \
+			|| printf 'WARNING: Database update step failed or was not needed.\n'
+		return 0
+	fi
 
 	if [ "${current}" = "${REQUIRED_WP_VERSION}" ]; then
 		printf 'WordPress:      %s (matches required version)\n' "${current}"

@@ -103,7 +103,9 @@ add_filter( 'rest_pre_dispatch',  'rtctest_pre_dispatch',  10, 3 );
 add_filter( 'rest_post_dispatch', 'rtctest_post_dispatch', 10, 3 );
 
 function rtctest_pre_dispatch( $result, $server, $request ) {
-	if ( ! isset( $_SERVER[ RTC_TEST_REQUEST_HEADER ] ) ) {
+	$tagged = isset( $_SERVER[ RTC_TEST_REQUEST_HEADER ] )
+	       || '1' === (string) $request->get_param( '_rtctest' );
+	if ( ! $tagged ) {
 		return $result;
 	}
 	if ( false === strpos( $request->get_route(), '/wp-sync/' ) ) {
@@ -156,11 +158,11 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 
 	$scenario = isset( $_SERVER[ RTC_TEST_SCENARIO_HEADER ] )
 		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_SCENARIO_HEADER ] ) )
-		: 'unknown';
+		: sanitize_text_field( (string) ( $request->get_param( '_rtcscenario' ) ?? 'unknown' ) );
 
 	$approach = isset( $_SERVER[ RTC_TEST_APPROACH_HEADER ] )
 		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_APPROACH_HEADER ] ) )
-		: '';
+		: sanitize_text_field( (string) ( $request->get_param( '_rtcapproach' ) ?? '' ) );
 
 	$data      = $response->get_data();
 	$rooms_in  = $request->get_param( 'rooms' ) ?? array();

@@ -28,9 +28,6 @@ APPROACHES="post-meta custom-table post-meta-transients custom-table-with-transi
 for approach in ${APPROACHES}; do
 	bash "${RTC}" apply-approach "${approach}"
 
-	# Clear log entries from any previous approach so report-all has clean data.
-	APPROACH="${approach}" bash "${RTC}" clear
-
 	APPROACH="${approach}" bash "${RTC}" baseline
 	APPROACH="${approach}" bash "${RTC}" single-idle
 	APPROACH="${approach}" bash "${RTC}" sustain
