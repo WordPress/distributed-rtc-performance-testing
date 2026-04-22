@@ -33,6 +33,7 @@
 #   n-idle              N_CLIENTS clients round-robin, awareness only
 #   compaction-trigger  Send updates until should_compact fires, then compact
 #   report              Fetch log from plugin and print summary table
+#   submit-ptr          POST log + env to WordPress.org (needs WPT_REPORT_API_KEY)
 #   clear               Delete all log entries (table intact)
 #   reset               Drop and recreate the log table
 
@@ -1403,6 +1404,116 @@ cmd_report() {
 	'
 }
 
+# submit-ptr -- POST RTC performance log + env to WordPress.org (phpunit-test-reporter).
+# Requires WPT_REPORT_API_KEY (bot username:password). Same auth model as PHPUnit host reporting.
+# Optional: WPT_REPORT_URL (default: make.wordpress.org hosting JSON API rtc-performance-results),
+#           PTR_ENV_LABEL (stored as env.label on w.org).
+cmd_submit_ptr() {
+	print_header "submit-ptr"
+	require_auth
+	if [ -z "${WPT_REPORT_API_KEY:-}" ]; then
+		die "WPT_REPORT_API_KEY is not set (host bot credentials as username:password; see Hosting Handbook)."
+	fi
+	command -v python3 >/dev/null 2>&1 || die "python3 is required for submit-ptr"
+
+	local api_url="${WPT_REPORT_URL:-https://make.wordpress.org/hosting/wp-json/wp-unit-test-api/v1/rtc-performance-results}"
+
+	local env_raw log_raw
+	env_raw=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_ENV_URL}" 2>/dev/null) || true
+	log_raw=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
+
+	[ -n "${env_raw}" ] || env_raw='{}'
+
+	if [ -z "${log_raw}" ] || [ "${log_raw}" = "[]" ]; then
+		die "No log data to submit. Run baseline, single-idle, and sustain before submitting."
+	fi
+	case "${log_raw}" in
+		'{'*)
+			die "Log endpoint returned an error: ${log_raw}"
+			;;
+	esac
+
+	WPT_REPORT_API_KEY="${WPT_REPORT_API_KEY}" \
+	PTR_ENV_LABEL="${PTR_ENV_LABEL:-}" \
+	RTC_TEST_SITE_URL="${WP_URL}" \
+	ENV_RAW="${env_raw}" \
+	LOG_RAW="${log_raw}" \
+	API_URL="${api_url}" \
+	python3 <<'PY'
+import base64
+import json
+import os
+import ssl
+import sys
+import urllib.error
+import urllib.request
+
+api_key = os.environ["WPT_REPORT_API_KEY"]
+api_url = os.environ["API_URL"]
+
+try:
+	env = json.loads(os.environ.get("ENV_RAW") or "{}")
+except json.JSONDecodeError as exc:
+	sys.exit(f"Invalid env JSON from rtc-test/v1/env: {exc}")
+
+if not isinstance(env, dict):
+	env = {}
+
+if os.environ.get("RTC_TEST_SITE_URL"):
+	env["rtc_test_site_url"] = os.environ["RTC_TEST_SITE_URL"]
+
+# Reporter indexes mysql_version / php_version (see phpunit-test-reporter RestAPI).
+if "mysql_version" not in env and "db_version" in env:
+	env["mysql_version"] = env["db_version"]
+
+label = (os.environ.get("PTR_ENV_LABEL") or "").strip()
+if label:
+	env["label"] = label
+
+try:
+	log = json.loads(os.environ.get("LOG_RAW") or "[]")
+except json.JSONDecodeError as exc:
+	sys.exit(f"Invalid log JSON from rtc-test/v1/log: {exc}")
+
+results_obj = {
+	"schema_version": 1,
+	"rtc_performance_log": log,
+}
+
+body_obj = {
+	"results": json.dumps(results_obj),
+	"env": json.dumps(env),
+}
+body_bytes = json.dumps(body_obj).encode("utf-8")
+
+req = urllib.request.Request(
+	api_url,
+	data=body_bytes,
+	method="POST",
+	headers={
+		"Authorization": "Basic "
+		+ base64.b64encode(api_key.encode("utf-8")).decode("ascii"),
+		"Content-Type": "application/json",
+		"User-Agent": "WordPress RTC Performance Test",
+	},
+)
+
+try:
+	with urllib.request.urlopen(req, timeout=120, context=ssl.create_default_context()) as resp:
+		out = resp.read().decode("utf-8", errors="replace")
+		code = resp.status
+except urllib.error.HTTPError as exc:
+	err_body = exc.read().decode("utf-8", errors="replace")
+	sys.stderr.write(err_body + "\n")
+	sys.exit(f"Submit failed: HTTP {exc.code}")
+
+if code // 100 != 2:
+	sys.exit(f"Unexpected HTTP status {code}: {out}")
+
+print(out)
+PY
+}
+
 cmd_clear() {
 	print_header "clear"
 	require_auth
@@ -1769,6 +1880,7 @@ case "${COMMAND}" in
 	concurrent)             cmd_concurrent ;;
 	sustain)                cmd_sustain ;;
 	report)                 cmd_report ;;
+	submit-ptr)             cmd_submit_ptr ;;
 	clear)                  cmd_clear ;;
 	reset)                  cmd_reset ;;
 	seed)                   cmd_seed ;;
@@ -1796,6 +1908,7 @@ case "${COMMAND}" in
 		printf '  concurrent            N_CLIENTS burst simultaneously, POLLS rounds (rendezvous-synced)\n'
 		printf '  sustain               N_CLIENTS independent pollers for DURATION seconds\n'
 		printf '  report                Fetch log from plugin and print summary table\n'
+		printf '  submit-ptr            Upload log + env to w.org (WPT_REPORT_API_KEY)\n'
 		printf '  clear                 Delete all log entries (table stays, schema intact)\n'
 		printf '  reset                 Drop the log table entirely (recreated on next tagged request)\n'
 		printf '\nCapture commands (require rtc-capture.php in mu-plugins):\n'
@@ -1823,6 +1936,9 @@ case "${COMMAND}" in
 		printf '  UPDATE_SIZE   small|medium|large payload (default: small)\n'
 		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
 		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'
+		printf '  WPT_REPORT_API_KEY  w.org bot auth for submit-ptr (username:password)\n'
+		printf '  WPT_REPORT_URL      Override rtc-performance-results API URL\n'
+		printf '  PTR_ENV_LABEL       Optional env.label when submitting to w.org\n'
 		exit 1
 		;;
 esac
