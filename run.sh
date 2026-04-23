@@ -19,6 +19,11 @@ RTC="${SCRIPT_DIR}/rtc-test.sh"
 # required WordPress version, and writes credentials to .env.
 bash "${RTC}" setup
 
+# ── Clear any log data from previous runs ─────────────────────────────────────
+# report-all and submit-results aggregate everything in the log table, so stale
+# rows from a prior run would skew the averages. Clear before each full suite.
+bash "${RTC}" clear
+
 # ── Per-approach test loop ────────────────────────────────────────────────────
 # For each approach: patch WP, reset RTC state, run the scenario suite.
 # APPROACH is passed as an env var so every log entry is tagged with the name.
