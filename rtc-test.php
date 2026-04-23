@@ -453,7 +453,7 @@ function rtctest_register_routes() {
 				'api_key'          => array(
 					'required'          => true,
 					'type'              => 'string',
-					'description'       => 'Reporter credentials in username:password format (DOTORG_REPORT_API_KEY).',
+					'description'       => 'Reporter credentials in username:password format (REPORTER_API_KEY).',
 					'sanitize_callback' => 'sanitize_text_field',
 				),
 				'environment_name' => array(

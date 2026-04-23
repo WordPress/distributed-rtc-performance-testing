@@ -69,7 +69,7 @@ if [ -f "${_env_file}" ]; then
 	_pre_post="${POST_ID:-}"
 	_pre_approach="${APPROACH:-}"
 	_pre_reporter_url="${REPORTER_URL:-}"
-	_pre_api_key="${DOTORG_REPORT_API_KEY:-}"
+	_pre_api_key="${REPORTER_API_KEY:-}"
 	_pre_env_name="${ENVIRONMENT_NAME:-}"
 	# shellcheck source=/dev/null
 	. "${_env_file}"
@@ -82,7 +82,7 @@ if [ -f "${_env_file}" ]; then
 	[ -n "${_pre_post}"         ] && POST_ID="${_pre_post}"
 	[ -n "${_pre_approach}"     ] && APPROACH="${_pre_approach}"
 	[ -n "${_pre_reporter_url}" ] && REPORTER_URL="${_pre_reporter_url}"
-	[ -n "${_pre_api_key}"      ] && DOTORG_REPORT_API_KEY="${_pre_api_key}"
+	[ -n "${_pre_api_key}"      ] && REPORTER_API_KEY="${_pre_api_key}"
 	[ -n "${_pre_env_name}"     ] && ENVIRONMENT_NAME="${_pre_env_name}"
 	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post \
 	      _pre_approach _pre_reporter_url _pre_api_key _pre_env_name
@@ -1632,9 +1632,9 @@ cmd_submit_results() {
 	require_auth
 
 	local reporter_url="${REPORTER_URL:-}"
-	local api_key="${DOTORG_REPORT_API_KEY:-}"
+	local api_key="${REPORTER_API_KEY:-}"
 	if [ -z "${reporter_url}" ] || [ -z "${api_key}" ]; then
-		printf 'REPORTER_URL and DOTORG_REPORT_API_KEY must be set to submit results.\n'
+		printf 'REPORTER_URL and REPORTER_API_KEY must be set to submit results.\n'
 		printf 'Skipping submission.\n'
 		return 0
 	fi
