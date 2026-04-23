@@ -41,6 +41,10 @@ While the test runner supports a number of environment variables that adjust how
 - `REPORTER_URL`: The URL to report results to. In most cases, this should be the default of https://make.wordpress.org/hosting. But it can be the URL of any site running the [PHPUnit Test Reporter plugin](https://github.com/wordPress/phpunit-test-reporter).
 - `DOTORG_REPORT_API_KEY`: The credentials of a reporting user on the `REPORTER_URL` site in the format of `username:application-password`.
 
+Hosts participating in the [PHPUnit Hosting Tests](https://make.wordpress.org/hosting/test-results/) can reuse the same credentials for this test runner.
+
+**Note:** if you need to be set up with a user account for submitting test results, please request one in the [#hosting](https://wordpress.slack.com/archives/C3D6T7F8Q) in Slack and ping `@desrosj` or `@amykamala`.
+
 Run the following command to create an `.env` file from the example:
 
 ```bash
@@ -57,7 +61,7 @@ You can then edit the `.env` file using the editor of your choice to adjust the 
 bash run.sh
 ```
 
-This will set up the environment,run the tests, and attempT to submit the results back to the site configured in the `REPORTER_URL`. 
+This will set up the environment,run the tests, and attempt to submit the results back to the site configured in the `REPORTER_URL`. 
 
 ---
 
