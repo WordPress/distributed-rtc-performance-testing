@@ -831,7 +831,7 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 	}
 
 	$response = wp_remote_post(
-		$reporter_url,
+		rtrim( $reporter_url, '/' ) . '/wp-json/wp-unit-test-api/v1/rtc-performance-results',
 		array(
 			'headers' => array(
 				'Content-Type'  => 'application/json',
