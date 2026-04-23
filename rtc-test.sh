@@ -5,7 +5,7 @@
 #
 # Requirements: bash, curl
 # WP-CLI (wp) is used by setup/teardown if available; not needed for test commands.
-# python3 is required for the replay command only.
+# python3 is required for the capture-sanitize and replay commands only.
 #
 # Workflow A -- run everything on the web host (WP-CLI available):
 #   bash rtc-test.sh setup
@@ -166,6 +166,8 @@ RTC_ENDPOINT="${WP_URL}/wp-json/wp-sync/v1/updates"
 PLUGIN_LOG_URL="${WP_URL}/wp-json/rtc-test/v1/log"
 PLUGIN_ENV_URL="${WP_URL}/wp-json/rtc-test/v1/env"
 PLUGIN_TABLE_URL="${WP_URL}/wp-json/rtc-test/v1/table"
+PLUGIN_REPORT_URL="${WP_URL}/wp-json/rtc-test/v1/report"
+PLUGIN_REPORT_ALL_URL="${WP_URL}/wp-json/rtc-test/v1/report-all"
 PLUGIN_SUBMIT_URL="${WP_URL}/wp-json/rtc-test/v1/submit"
 
 CAPTURE_SESSION_URL="${WP_URL}/wp-json/rtc-capture/v1/session"
@@ -1016,9 +1018,7 @@ cmd_single_idle() {
 				grep -qi 'x-rtc-test-active' /tmp/rtctest_last_headers.txt && _hook_active=1
 				grep -qi 'x-rtc-db-insert: 1' /tmp/rtctest_last_headers.txt && _db_inserted=1
 				_db_error=$(grep -i 'x-rtc-db-error:' /tmp/rtctest_last_headers.txt \
-					| head -1 | sed 's/.*x-rtc-db-error: *//i' | tr -d '\r' \
-					| python3 -c 'import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))' \
-					2>/dev/null || true)
+					| head -1 | sed 's/.*x-rtc-db-error: *//i' | tr -d '\r' || true)
 			fi
 			if [ "${_hook_active}" = "1" ] && [ "${_db_inserted}" = "1" ]; then
 				printf 'Plugin logging: ACTIVE (hook ran, row inserted)\n'
@@ -1564,249 +1564,51 @@ cmd_env() {
 	print_env
 }
 
-cmd_report() {
-	print_header "report"
-	require_auth
-
-	printf 'Environment:\n'
-	print_env
-
-	# Fetch log.
-	printf '\nFetching log from %s ...\n' "${PLUGIN_LOG_URL}"
-	local log
-	log=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
-
-	if [ -z "${log}" ] || [ "${log}" = "[]" ]; then
-		printf 'No log entries found.\n'
-		return
+# _print_report_text DATA
+# Extracts and prints the pre-formatted "text" field from a {"text":"..."} JSON
+# response returned by /rtc-test/v1/report or /rtc-test/v1/report-all.
+_print_report_text() {
+	local data="$1"
+	if [ -z "${data}" ]; then
+		printf 'No response from server.\n'
+		return 1
 	fi
-
-	# A WordPress error response is a JSON object (starts with '{'), not an array.
-	# This happens when the user lacks permission or the plugin is not active.
-	case "${log}" in
-		'{'*)
-			printf 'ERROR: log endpoint returned an error, not log data:\n'
-			printf '  %s\n' "${log}"
+	# A WordPress error response has a "code" field rather than "text".
+	case "${data}" in
+		*'"code"'*)
+			printf 'ERROR: %s\n' "${data}"
 			printf '\nPossible causes:\n'
 			printf '  1. Plugin not active: copy rtc-test.php to wp-content/mu-plugins/\n'
 			printf '  2. User lacks edit_posts capability\n'
-			return 1
-			;;
+			return 1 ;;
 	esac
+	# Extract the "text" value and unescape JSON \n sequences.
+	local text
+	text=$(printf '%s' "${data}" | awk -F'"text":"' 'NF>1{ s=$2; sub(/".*$/, "", s); gsub(/\\n/, "\n", s); printf "%s", s }')
+	if [ -z "${text}" ]; then
+		printf 'No log entries found.\n'
+		return
+	fi
+	printf '%s\n' "${text}"
+}
 
-	# Parse log with awk: compute per-scenario stats.
-	# Each JSON entry is on one line; we extract fields with pattern matching.
-	# Uses only POSIX/mawk-compatible awk (no gawk 3-arg match or gensub).
+cmd_report() {
+	print_header "report"
+	require_auth
+	printf 'Environment:\n'
+	print_env
 	printf '\nPer-scenario summary:\n'
-	printf '%s' "${log}" | awk '
-	# extract_str: pull a quoted-string value for "key":"value" fields.
-	function extract_str(s, key,    pat, val) {
-		pat = "\"" key "\":\""
-		if (!match(s, pat "[^\"]+\"")) return "unknown"
-		val = substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
-		return val
-	}
-	# extract_num: pull a numeric value for "key":number fields.
-	function extract_num(s, key,    pat) {
-		pat = "\"" key "\":[0-9.]+"
-		if (!match(s, pat)) return 0
-		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
-	}
-	{
-		# We process the full log as one line, splitting on "},{" boundaries.
-		n = split($0, entries, /\},\{/)
-		for (i = 1; i <= n; i++) {
-			e = entries[i]
-			scenario = extract_str(e, "scenario")
-			ms            = extract_num(e, "ms")
-			total_ms      = extract_num(e, "total_ms")
-			cpu_ms        = extract_num(e, "cpu_ms")
-			total_cpu_ms  = extract_num(e, "total_cpu_ms")
-			dbq  = extract_num(e, "db_queries")
-			dbt  = extract_num(e, "db_time_ms")
-			peak = extract_num(e, "peak_memory")
-			ui   = extract_num(e, "updates_in")
-			uo   = extract_num(e, "updates_out")
-			sc   = (match(e, /"should_compact":true/) ? 1 : 0)
-			conc = extract_num(e, "concurrent")
-
-			count[scenario]++
-			ms_sum[scenario]           += ms
-			ms_sq[scenario]            += ms * ms
-			total_ms_sum[scenario]     += total_ms
-			cpu_ms_sum[scenario]       += cpu_ms
-			total_cpu_ms_sum[scenario] += total_cpu_ms
-			dbq_sum[scenario]      += dbq
-			dbt_sum[scenario]      += dbt
-			peak_sum[scenario]     += peak
-			ui_sum[scenario]       += ui
-			uo_sum[scenario]       += uo
-			sc_sum[scenario]       += sc
-			if (conc > max_conc[scenario]) max_conc[scenario] = conc
-		}
-	}
-	END {
-		# Print header.
-		# disp_ms       = rest_pre..post (endpoint logic only)
-		# total_ms      = REQUEST_TIME_FLOAT..post (full worker occupancy incl. WP bootstrap + auth)
-		# cpu_ms        = getrusage() delta across dispatch only
-		# total_cpu_ms  = getrusage() delta from MU-plugin load to post_dispatch (full request CPU)
-		# mem_mb        = mean PHP peak memory for the request (MB)
-		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
-			"Scenario", "n", "disp_ms", "total_ms", "cpu_ms", "tot_cpu_ms", "sd_disp", "db_q", "db_t_ms", "mem_mb", "ui_tot", "uo_tot", "sc", "conc"
-		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
-			"", "", "avg", "avg", "avg", "avg", "stddev", "avg", "avg", "avg", "sum", "sum", "sum", "max"
-		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
-			"----------------------", "------", "--------", "--------",
-			"--------", "-----------", "--------", "--------", "--------", "------", "------", "------", "----", "----"
-
-		# Compute baseline mean for ratio column.
-		baseline_mean = 0
-		if ("baseline" in count && count["baseline"] > 0)
-			baseline_mean = ms_sum["baseline"] / count["baseline"]
-
-		for (s in count) {
-			n    = count[s]
-			mean = ms_sum[s] / n
-			var  = (ms_sq[s] / n) - (mean * mean)
-			if (var < 0) var = 0
-			std  = sqrt(var)
-			printf "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6.1f %6d %6d %5d %5d\n",
-				s, n, mean, total_ms_sum[s] / n, cpu_ms_sum[s] / n,
-				total_cpu_ms_sum[s] / n, std,
-				dbq_sum[s] / n,
-				dbt_sum[s] / n,
-				peak_sum[s] / n / 1048576,
-				ui_sum[s], uo_sum[s],
-				sc_sum[s],
-				max_conc[s]
-		}
-
-		if (baseline_mean > 0) {
-			printf "\nRatio to baseline (disp_ms / baseline_disp_ms = %.1f):\n", baseline_mean
-			for (s in count) {
-				if (s == "baseline") continue
-				mean = ms_sum[s] / count[s]
-				printf "  %-22s %.2fx\n", s, mean / baseline_mean
-			}
-		}
-	}
-	'
+	local data
+	data=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_REPORT_URL}" 2>/dev/null) || true
+	_print_report_text "${data}"
 }
 
 cmd_report_all() {
 	print_header "report-all"
 	require_auth
-
-	# Fetch the full log once.
-	local log
-	log=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
-
-	if [ -z "${log}" ] || [ "${log}" = "[]" ]; then
-		printf 'No log entries found.\n'
-		return
-	fi
-
-	case "${log}" in
-		'{'*)
-			printf 'ERROR: log endpoint returned an error:\n  %s\n' "${log}"
-			return 1 ;;
-	esac
-
-	# Summarise by approach × scenario.
-	printf '%s' "${log}" | awk '
-	function extract_str(s, key,    pat, val) {
-		pat = "\"" key "\":\""
-		if (!match(s, pat "[^\"]+\"")) return ""
-		val = substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
-		return val
-	}
-	function extract_num(s, key,    pat) {
-		pat = "\"" key "\":[0-9.]+"
-		if (!match(s, pat)) return 0
-		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
-	}
-	{
-		n = split($0, entries, /\},\{/)
-		for (i = 1; i <= n; i++) {
-			e        = entries[i]
-			approach = extract_str(e, "approach")
-			if (approach == "") approach = "(untagged)"
-			scenario     = extract_str(e, "scenario")
-			key          = approach SUBSEP scenario
-			ms           = extract_num(e, "ms")
-			total_ms     = extract_num(e, "total_ms")
-			cpu_ms       = extract_num(e, "cpu_ms")
-			total_cpu_ms = extract_num(e, "total_cpu_ms")
-			dbq          = extract_num(e, "db_queries")
-			dbt          = extract_num(e, "db_time_ms")
-			peak         = extract_num(e, "peak_memory")
-			conc         = extract_num(e, "concurrent")
-
-			count[key]++
-			ms_sum[key]           += ms
-			ms_sq[key]            += ms * ms
-			total_ms_sum[key]     += total_ms
-			cpu_ms_sum[key]       += cpu_ms
-			total_cpu_ms_sum[key] += total_cpu_ms
-			dbq_sum[key]          += dbq
-			dbt_sum[key]          += dbt
-			peak_sum[key]         += peak
-			if (conc > max_conc[key]) max_conc[key] = conc
-
-			approaches[approach] = 1
-			scenarios[scenario]  = 1
-		}
-	}
-	END {
-		# Collect and sort approach/scenario lists.
-		na = 0; for (a in approaches) { ap[++na] = a }
-		ns = 0; for (s in scenarios)  { sc[++ns] = s }
-
-		for (ai = 1; ai <= na; ai++) {
-			a = ap[ai]
-			printf "\n── Approach: %s ──\n", a
-			printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n",
-				"Scenario", "n", "disp_ms", "total_ms", "cpu_ms", "tot_cpu_ms",
-				"sd_disp", "db_q", "db_t_ms", "conc"
-			printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n",
-				"----------------------","------","--------","--------",
-				"--------","-----------","--------","--------","--------","------"
-
-			baseline_mean = 0
-			key = a SUBSEP "baseline"
-			if (count[key] > 0) baseline_mean = ms_sum[key] / count[key]
-
-			for (si = 1; si <= ns; si++) {
-				s   = sc[si]
-				key = a SUBSEP s
-				if (!(key in count)) continue
-				n    = count[key]
-				mean = ms_sum[key] / n
-				var  = (ms_sq[key] / n) - (mean * mean)
-				if (var < 0) var = 0
-				printf "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6d\n",
-					s, n, mean,
-					total_ms_sum[key] / n, cpu_ms_sum[key] / n,
-					total_cpu_ms_sum[key] / n,
-					sqrt(var),
-					dbq_sum[key] / n, dbt_sum[key] / n,
-					max_conc[key]
-			}
-
-			if (baseline_mean > 0) {
-				printf "\n  Ratio to baseline (disp_ms):\n"
-				for (si = 1; si <= ns; si++) {
-					s = sc[si]
-					if (s == "baseline") continue
-					key = a SUBSEP s
-					if (!(key in count)) continue
-					printf "    %-22s %.2fx\n", s, (ms_sum[key] / count[key]) / baseline_mean
-				}
-			}
-		}
-	}
-	'
+	local data
+	data=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_REPORT_ALL_URL}" 2>/dev/null) || true
+	_print_report_text "${data}"
 }
 
 cmd_submit_results() {

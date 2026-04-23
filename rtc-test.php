@@ -419,6 +419,26 @@ function rtctest_register_routes() {
 
 	register_rest_route(
 		'rtc-test/v1',
+		'/report',
+		array(
+			'methods'             => WP_REST_Server::READABLE,
+			'callback'            => 'rtctest_rest_report',
+			'permission_callback' => $cap_check,
+		)
+	);
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/report-all',
+		array(
+			'methods'             => WP_REST_Server::READABLE,
+			'callback'            => 'rtctest_rest_report_all',
+			'permission_callback' => $cap_check,
+		)
+	);
+
+	register_rest_route(
+		'rtc-test/v1',
 		'/submit',
 		array(
 			'methods'             => WP_REST_Server::CREATABLE,
@@ -444,6 +464,229 @@ function rtctest_register_routes() {
 			),
 		)
 	);
+}
+
+// -------------------------------------------------------------------------
+// Monitor: report helpers
+// -------------------------------------------------------------------------
+
+/**
+ * Aggregate log rows by scenario and return a pre-formatted table as {"text":"..."}.
+ * Columns: scenario, n, mean disp_ms, mean total_ms, mean cpu_ms, mean tot_cpu_ms,
+ *          stddev disp_ms, mean db_queries, mean db_time_ms, mean mem_mb,
+ *          updates_in sum, updates_out sum, should_compact sum, max concurrent.
+ */
+function rtctest_rest_report() {
+	global $wpdb;
+
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$rows = $wpdb->get_results(
+		'SELECT scenario, ms, total_ms, cpu_ms, total_cpu_ms, db_queries, db_time_ms,'
+		. ' peak_memory, updates_in, updates_out, should_compact, concurrent'
+		. ' FROM ' . rtctest_log_table() . ' ORDER BY id ASC',
+		ARRAY_A
+	);
+
+	if ( empty( $rows ) ) {
+		return rest_ensure_response( array( 'text' => '' ) );
+	}
+
+	$agg = array();
+	foreach ( $rows as $row ) {
+		$s = $row['scenario'];
+		if ( ! isset( $agg[ $s ] ) ) {
+			$agg[ $s ] = array(
+				'n'                  => 0,
+				'ms_sum'             => 0.0,
+				'ms_sq_sum'          => 0.0,
+				'total_ms_sum'       => 0.0,
+				'cpu_ms_sum'         => 0.0,
+				'total_cpu_ms_sum'   => 0.0,
+				'db_queries_sum'     => 0.0,
+				'db_time_ms_sum'     => 0.0,
+				'peak_memory_sum'    => 0.0,
+				'updates_in_sum'     => 0,
+				'updates_out_sum'    => 0,
+				'should_compact_sum' => 0,
+				'max_concurrent'     => 0,
+			);
+		}
+		$a  = &$agg[ $s ];
+		$ms = (float) $row['ms'];
+		$a['n']++;
+		$a['ms_sum']             += $ms;
+		$a['ms_sq_sum']          += $ms * $ms;
+		$a['total_ms_sum']       += (float) $row['total_ms'];
+		$a['cpu_ms_sum']         += (float) $row['cpu_ms'];
+		$a['total_cpu_ms_sum']   += (float) $row['total_cpu_ms'];
+		$a['db_queries_sum']     += (float) $row['db_queries'];
+		$a['db_time_ms_sum']     += (float) $row['db_time_ms'];
+		$a['peak_memory_sum']    += (float) $row['peak_memory'];
+		$a['updates_in_sum']     += (int) $row['updates_in'];
+		$a['updates_out_sum']    += (int) $row['updates_out'];
+		$a['should_compact_sum'] += (int) $row['should_compact'];
+		if ( (int) $row['concurrent'] > $a['max_concurrent'] ) {
+			$a['max_concurrent'] = (int) $row['concurrent'];
+		}
+		unset( $a );
+	}
+
+	$fmt_h = "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n";
+	$fmt_r = "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6.1f %6d %6d %5d %5d\n";
+
+	$out  = sprintf( $fmt_h, 'Scenario', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'mem_mb', 'ui_tot', 'uo_tot', 'sc', 'conc' );
+	$out .= sprintf( $fmt_h, '', '', 'avg', 'avg', 'avg', 'avg', 'stddev', 'avg', 'avg', 'avg', 'sum', 'sum', 'sum', 'max' );
+	$out .= sprintf( $fmt_h,
+		str_repeat( '-', 22 ), str_repeat( '-', 6 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 11 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 6 ),
+		str_repeat( '-', 6 ),  str_repeat( '-', 6 ),
+		str_repeat( '-', 5 ),  str_repeat( '-', 5 )
+	);
+
+	$baseline_mean = 0.0;
+	foreach ( $agg as $name => $a ) {
+		$n    = $a['n'];
+		$mean = $a['ms_sum'] / $n;
+		$var  = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+		$out .= sprintf( $fmt_r,
+			$name, $n, $mean,
+			$a['total_ms_sum'] / $n,
+			$a['cpu_ms_sum'] / $n,
+			$a['total_cpu_ms_sum'] / $n,
+			sqrt( $var ),
+			$a['db_queries_sum'] / $n,
+			$a['db_time_ms_sum'] / $n,
+			$a['peak_memory_sum'] / $n / 1048576,
+			$a['updates_in_sum'],
+			$a['updates_out_sum'],
+			$a['should_compact_sum'],
+			$a['max_concurrent']
+		);
+		if ( 'baseline' === $name ) {
+			$baseline_mean = $mean;
+		}
+	}
+
+	if ( $baseline_mean > 0.0 ) {
+		$out .= sprintf( "\nRatio to baseline (disp_ms / baseline_disp_ms = %.1f):\n", $baseline_mean );
+		foreach ( $agg as $name => $a ) {
+			if ( 'baseline' === $name ) {
+				continue;
+			}
+			$out .= sprintf( "  %-22s %.2fx\n", $name, ( $a['ms_sum'] / $a['n'] ) / $baseline_mean );
+		}
+	}
+
+	return rest_ensure_response( array( 'text' => rtrim( $out ) ) );
+}
+
+/**
+ * Aggregate log rows by approach × scenario and return a pre-formatted table
+ * per approach as {"text":"..."}.
+ */
+function rtctest_rest_report_all() {
+	global $wpdb;
+
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$rows = $wpdb->get_results(
+		'SELECT approach, scenario, ms, total_ms, cpu_ms, total_cpu_ms,'
+		. ' db_queries, db_time_ms, peak_memory, concurrent'
+		. ' FROM ' . rtctest_log_table() . ' ORDER BY id ASC',
+		ARRAY_A
+	);
+
+	if ( empty( $rows ) ) {
+		return rest_ensure_response( array( 'text' => '' ) );
+	}
+
+	$agg = array();
+	foreach ( $rows as $row ) {
+		$approach = '' !== $row['approach'] ? $row['approach'] : '(untagged)';
+		$scenario = $row['scenario'];
+		if ( ! isset( $agg[ $approach ][ $scenario ] ) ) {
+			$agg[ $approach ][ $scenario ] = array(
+				'n'                => 0,
+				'ms_sum'           => 0.0,
+				'ms_sq_sum'        => 0.0,
+				'total_ms_sum'     => 0.0,
+				'cpu_ms_sum'       => 0.0,
+				'total_cpu_ms_sum' => 0.0,
+				'db_queries_sum'   => 0.0,
+				'db_time_ms_sum'   => 0.0,
+				'peak_memory_sum'  => 0.0,
+				'max_concurrent'   => 0,
+			);
+		}
+		$a  = &$agg[ $approach ][ $scenario ];
+		$ms = (float) $row['ms'];
+		$a['n']++;
+		$a['ms_sum']           += $ms;
+		$a['ms_sq_sum']        += $ms * $ms;
+		$a['total_ms_sum']     += (float) $row['total_ms'];
+		$a['cpu_ms_sum']       += (float) $row['cpu_ms'];
+		$a['total_cpu_ms_sum'] += (float) $row['total_cpu_ms'];
+		$a['db_queries_sum']   += (float) $row['db_queries'];
+		$a['db_time_ms_sum']   += (float) $row['db_time_ms'];
+		$a['peak_memory_sum']  += (float) $row['peak_memory'];
+		if ( (int) $row['concurrent'] > $a['max_concurrent'] ) {
+			$a['max_concurrent'] = (int) $row['concurrent'];
+		}
+		unset( $a );
+	}
+
+	$fmt_h = "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n";
+	$fmt_r = "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6d\n";
+	$sep_h = sprintf( $fmt_h,
+		str_repeat( '-', 22 ), str_repeat( '-', 6 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 11 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 6 )
+	);
+
+	$out = '';
+	foreach ( $agg as $approach => $scenarios ) {
+		$out .= sprintf( "\n── Approach: %s ──\n", $approach );
+		$out .= sprintf( $fmt_h, 'Scenario', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'conc' );
+		$out .= $sep_h;
+
+		$baseline_mean = 0.0;
+		if ( isset( $scenarios['baseline'] ) ) {
+			$b             = $scenarios['baseline'];
+			$baseline_mean = $b['ms_sum'] / $b['n'];
+		}
+
+		foreach ( $scenarios as $name => $a ) {
+			$n    = $a['n'];
+			$mean = $a['ms_sum'] / $n;
+			$var  = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+			$out .= sprintf( $fmt_r,
+				$name, $n, $mean,
+				$a['total_ms_sum'] / $n,
+				$a['cpu_ms_sum'] / $n,
+				$a['total_cpu_ms_sum'] / $n,
+				sqrt( $var ),
+				$a['db_queries_sum'] / $n,
+				$a['db_time_ms_sum'] / $n,
+				$a['max_concurrent']
+			);
+		}
+
+		if ( $baseline_mean > 0.0 ) {
+			$out .= "\n  Ratio to baseline (disp_ms):\n";
+			foreach ( $scenarios as $name => $a ) {
+				if ( 'baseline' === $name ) {
+					continue;
+				}
+				$out .= sprintf( "    %-22s %.2fx\n", $name, ( $a['ms_sum'] / $a['n'] ) / $baseline_mean );
+			}
+		}
+	}
+
+	return rest_ensure_response( array( 'text' => ltrim( $out ) ) );
 }
 
 function rtctest_detect_object_cache_type() {
