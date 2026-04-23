@@ -24,6 +24,9 @@ bash "${RTC}" setup
 # rows from a prior run would skew the averages. Clear before each full suite.
 bash "${RTC}" clear
 
+# ── Environment snapshot ──────────────────────────────────────────────────────
+bash "${RTC}" env
+
 # ── Per-approach test loop ────────────────────────────────────────────────────
 # For each approach: patch WP, reset RTC state, run the scenario suite.
 # APPROACH is passed as an env var so every log entry is tagged with the name.

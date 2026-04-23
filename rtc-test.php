@@ -416,6 +416,37 @@ function rtctest_register_routes() {
 			'permission_callback' => $cap_check,
 		)
 	);
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/submit',
+		array(
+			'methods'             => WP_REST_Server::CREATABLE,
+			'callback'            => 'rtctest_rest_submit',
+			'permission_callback' => $cap_check,
+			'args'                => array(
+				'reporter_url'     => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'esc_url_raw',
+				),
+				'reporter_user'    => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+				),
+				'reporter_pass'    => array(
+					'required' => true,
+					'type'     => 'string',
+				),
+				'environment_name' => array(
+					'required'          => false,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+				),
+			),
+		)
+	);
 }
 
 function rtctest_detect_object_cache_type() {
@@ -487,6 +518,126 @@ function rtctest_get_env() {
 	update_option( RTC_TEST_ENV_OPTION, $env, false );
 
 	return rest_ensure_response( $env );
+}
+
+function rtctest_rest_submit( WP_REST_Request $request ) {
+	global $wpdb;
+
+	$reporter_url     = $request->get_param( 'reporter_url' );
+	$reporter_user    = $request->get_param( 'reporter_user' );
+	$reporter_pass    = $request->get_param( 'reporter_pass' );
+	$environment_name = $request->get_param( 'environment_name' ) ?: get_option( 'siteurl' );
+
+	// Build environment snapshot.
+	$env = rtctest_get_env()->get_data();
+
+	// Fetch all log rows.
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$rows = $wpdb->get_results(
+		'SELECT approach, scenario, ms, total_ms, cpu_ms, total_cpu_ms, db_queries, db_time_ms, peak_memory, concurrent'
+		. ' FROM ' . rtctest_log_table(),
+		ARRAY_A
+	);
+
+	if ( empty( $rows ) ) {
+		return new WP_Error( 'no_data', 'No log entries to submit.', array( 'status' => 400 ) );
+	}
+
+	// Aggregate by approach × scenario.
+	$agg = array();
+	foreach ( $rows as $row ) {
+		$approach = '' !== $row['approach'] ? $row['approach'] : 'untagged';
+		$scenario = $row['scenario'];
+		if ( ! isset( $agg[ $approach ][ $scenario ] ) ) {
+			$agg[ $approach ][ $scenario ] = array(
+				'n'                => 0,
+				'ms_sum'           => 0.0,
+				'ms_sq_sum'        => 0.0,
+				'total_ms_sum'     => 0.0,
+				'cpu_ms_sum'       => 0.0,
+				'total_cpu_ms_sum' => 0.0,
+				'db_queries_sum'   => 0.0,
+				'db_time_ms_sum'   => 0.0,
+				'peak_memory_sum'  => 0.0,
+				'max_concurrent'   => 0,
+			);
+		}
+		$s  = &$agg[ $approach ][ $scenario ];
+		$ms = (float) $row['ms'];
+		$s['n']++;
+		$s['ms_sum']           += $ms;
+		$s['ms_sq_sum']        += $ms * $ms;
+		$s['total_ms_sum']     += (float) $row['total_ms'];
+		$s['cpu_ms_sum']       += (float) $row['cpu_ms'];
+		$s['total_cpu_ms_sum'] += (float) $row['total_cpu_ms'];
+		$s['db_queries_sum']   += (float) $row['db_queries'];
+		$s['db_time_ms_sum']   += (float) $row['db_time_ms'];
+		$s['peak_memory_sum']  += (float) $row['peak_memory'];
+		if ( (int) $row['concurrent'] > $s['max_concurrent'] ) {
+			$s['max_concurrent'] = (int) $row['concurrent'];
+		}
+		unset( $s );
+	}
+
+	// Build results structure.
+	$results = array();
+	foreach ( $agg as $approach => $scenarios ) {
+		$results[ $approach ] = array();
+		foreach ( $scenarios as $scenario => $s ) {
+			$n    = $s['n'];
+			$mean = $s['ms_sum'] / $n;
+			$var  = max( 0.0, ( $s['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+			$results[ $approach ][ $scenario ] = array(
+				'n'                 => $n,
+				'mean_disp_ms'      => round( $mean, 2 ),
+				'mean_total_ms'     => round( $s['total_ms_sum'] / $n, 2 ),
+				'mean_cpu_ms'       => round( $s['cpu_ms_sum'] / $n, 2 ),
+				'mean_total_cpu_ms' => round( $s['total_cpu_ms_sum'] / $n, 2 ),
+				'stddev_disp_ms'    => round( sqrt( $var ), 2 ),
+				'mean_db_queries'   => round( $s['db_queries_sum'] / $n, 1 ),
+				'mean_db_time_ms'   => round( $s['db_time_ms_sum'] / $n, 2 ),
+				'mean_mem_mb'       => round( $s['peak_memory_sum'] / $n / 1048576, 2 ),
+				'max_concurrent'    => $s['max_concurrent'],
+			);
+		}
+	}
+
+	$response = wp_remote_post(
+		$reporter_url,
+		array(
+			'headers' => array(
+				'Content-Type'  => 'application/json',
+				'Authorization' => 'Basic ' . base64_encode( $reporter_user . ':' . $reporter_pass ),
+			),
+			'body'    => wp_json_encode( array(
+				'environment_name' => $environment_name,
+				'env'              => $env,
+				'results'          => $results,
+			) ),
+			'timeout' => 30,
+		)
+	);
+
+	if ( is_wp_error( $response ) ) {
+		return new WP_Error( 'submit_failed', $response->get_error_message(), array( 'status' => 502 ) );
+	}
+
+	$http_code = wp_remote_retrieve_response_code( $response );
+	$body      = wp_remote_retrieve_body( $response );
+
+	if ( $http_code < 200 || $http_code >= 300 ) {
+		return new WP_Error(
+			'reporter_error',
+			sprintf( 'Reporter returned HTTP %d: %s', $http_code, $body ),
+			array( 'status' => 502 )
+		);
+	}
+
+	return rest_ensure_response( array(
+		'submitted' => true,
+		'http_code' => $http_code,
+		'response'  => json_decode( $body, true ) ?? $body,
+	) );
 }
 
 // -------------------------------------------------------------------------

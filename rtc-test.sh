@@ -169,6 +169,7 @@ RTC_ENDPOINT="${WP_URL}/wp-json/wp-sync/v1/updates"
 PLUGIN_LOG_URL="${WP_URL}/wp-json/rtc-test/v1/log"
 PLUGIN_ENV_URL="${WP_URL}/wp-json/rtc-test/v1/env"
 PLUGIN_TABLE_URL="${WP_URL}/wp-json/rtc-test/v1/table"
+PLUGIN_SUBMIT_URL="${WP_URL}/wp-json/rtc-test/v1/submit"
 
 CAPTURE_SESSION_URL="${WP_URL}/wp-json/rtc-capture/v1/session"
 CAPTURE_SESSIONS_URL="${WP_URL}/wp-json/rtc-capture/v1/sessions"
@@ -1533,36 +1534,45 @@ cmd_sustain() {
 	printf 'Key columns: tot_cpu_ms (full request CPU), conc (max simultaneous workers).\n'
 }
 
+# print_env -- fetch and display environment snapshot as a table.
+# No header; suitable for embedding in other commands.
+print_env() {
+	local env
+	env=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_ENV_URL}" 2>/dev/null) || true
+	if [ -z "${env}" ]; then
+		printf '  (could not reach rtc-test/v1/env -- is the plugin active?)\n'
+		return
+	fi
+	# The REST API returns compact single-line JSON. Split on commas so each
+	# key:value pair lands on its own line, then strip braces and quotes.
+	printf '%s' "${env}" | tr ',' '\n' | awk '
+	{
+		gsub(/[{}"]/, "")
+		if (match($0, /php_version:/))           printf "  %-22s %s\n", "PHP:",              substr($0, RSTART+12)
+		if (match($0, /wp_version:/))            printf "  %-22s %s\n", "WordPress:",        substr($0, RSTART+11)
+		if (match($0, /db_version:/))            printf "  %-22s %s\n", "Database:",         substr($0, RSTART+11)
+		if (match($0, /gutenberg_version:/))     printf "  %-22s %s\n", "Gutenberg:",        substr($0, RSTART+18)
+		if (match($0, /gutenberg_active:/))      printf "  %-22s %s\n", "Gutenberg active:", substr($0, RSTART+17)
+		if (match($0, /object_cache_type:/))     printf "  %-22s %s\n", "Object cache:",     substr($0, RSTART+18)
+		if (match($0, /savequeries:/))           printf "  %-22s %s\n", "SAVEQUERIES:",      substr($0, RSTART+12)
+		if (match($0, /compaction_threshold:/))  printf "  %-22s %s updates\n", "Compact at:", substr($0, RSTART+21)
+		if (match($0, /awareness_timeout_s:/))   printf "  %-22s %s s\n", "Awareness TTL:",  substr($0, RSTART+20)
+	}
+	'
+}
+
+cmd_env() {
+	print_header "env"
+	require_auth
+	print_env
+}
+
 cmd_report() {
 	print_header "report"
 	require_auth
 
-	# Fetch environment fingerprint.
 	printf 'Environment:\n'
-	local env
-	env=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_ENV_URL}" 2>/dev/null) || true
-	if [ -n "${env}" ]; then
-		# The REST API returns compact single-line JSON. Split on commas first so
-		# each key:value pair lands on its own line, then strip braces and quotes.
-		printf '%s' "${env}" | tr ',' '\n' | awk '
-		{
-			gsub(/[{}"]/, "")
-			if (match($0, /php_version:/))           printf "  PHP:              %s\n", substr($0, RSTART+12)
-			if (match($0, /wp_version:/))            printf "  WordPress:        %s\n", substr($0, RSTART+11)
-			if (match($0, /db_version:/))            printf "  DB:               %s\n", substr($0, RSTART+11)
-			if (match($0, /gutenberg_version:/))     printf "  Gutenberg:        %s\n", substr($0, RSTART+18)
-			if (match($0, /gutenberg_active:/))      printf "  Gutenberg active: %s\n", substr($0, RSTART+17)
-			if (match($0, /ext_object_cache:/))      printf "  Ext object cache: %s\n", substr($0, RSTART+17)
-			if (match($0, /savequeries:/))           printf "  SAVEQUERIES:      %s\n", substr($0, RSTART+12)
-			if (match($0, /compaction_threshold:/))  printf "  Compact at:       %s updates\n", substr($0, RSTART+21)
-			if (match($0, /awareness_timeout_s:/))   printf "  Awareness TTL:    %s s\n", substr($0, RSTART+20)
-			if (match($0, /storage_backend:/))       printf "  Storage:          %s\n", substr($0, RSTART+16)
-			if (match($0, /storage_post_type:/))     printf "  Storage post type:%s\n", substr($0, RSTART+18)
-		}
-		'
-	else
-		printf '  (could not reach rtc-test/v1/env -- is the plugin active?)\n'
-	fi
+	print_env
 
 	# Fetch log.
 	printf '\nFetching log from %s ...\n' "${PLUGIN_LOG_URL}"
@@ -1806,7 +1816,6 @@ cmd_submit_results() {
 	print_header "submit-results"
 	require_auth
 
-	# Reporter endpoint config — required to submit.
 	local reporter_url="${REPORTER_URL:-}"
 	local reporter_user="${REPORTER_USER:-}"
 	local reporter_pass="${REPORTER_PASS:-}"
@@ -1816,127 +1825,26 @@ cmd_submit_results() {
 		return 0
 	fi
 
-	# Fetch environment fingerprint for the submission payload.
-	local env_json
-	env_json=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_ENV_URL}" 2>/dev/null) || env_json='{}'
-
-	# Fetch the full log.
-	local log
-	log=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
-	if [ -z "${log}" ] || [ "${log}" = "[]" ]; then
-		printf 'No log entries to submit.\n'
-		return 0
-	fi
-
-	# Aggregate per approach × scenario and build the results JSON using awk.
-	local results_json
-	results_json=$(printf '%s' "${log}" | awk '
-	function extract_str(s, key,    pat, val) {
-		pat = "\"" key "\":\""
-		if (!match(s, pat "[^\"]+\"")) return ""
-		val = substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
-		return val
-	}
-	function extract_num(s, key,    pat) {
-		pat = "\"" key "\":[0-9.]+"
-		if (!match(s, pat)) return 0
-		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
-	}
-	{
-		n = split($0, entries, /\},\{/)
-		for (i = 1; i <= n; i++) {
-			e            = entries[i]
-			approach     = extract_str(e, "approach")
-			if (approach == "") approach = "untagged"
-			scenario     = extract_str(e, "scenario")
-			key          = approach SUBSEP scenario
-			ms           = extract_num(e, "ms")
-			total_ms     = extract_num(e, "total_ms")
-			cpu_ms       = extract_num(e, "cpu_ms")
-			total_cpu_ms = extract_num(e, "total_cpu_ms")
-			dbq          = extract_num(e, "db_queries")
-			dbt          = extract_num(e, "db_time_ms")
-			peak         = extract_num(e, "peak_memory")
-			conc         = extract_num(e, "concurrent")
-
-			count[key]++
-			ms_sum[key]           += ms
-			ms_sq[key]            += ms * ms
-			total_ms_sum[key]     += total_ms
-			cpu_ms_sum[key]       += cpu_ms
-			total_cpu_ms_sum[key] += total_cpu_ms
-			dbq_sum[key]          += dbq
-			dbt_sum[key]          += dbt
-			peak_sum[key]         += peak
-			if (conc > max_conc[key]) max_conc[key] = conc
-
-			approaches[approach] = 1
-			scenarios[scenario]  = 1
-		}
-	}
-	END {
-		na = 0; for (a in approaches) ap[++na] = a
-		ns = 0; for (s in scenarios)  sc[++ns] = s
-
-		printf "{"
-		for (ai = 1; ai <= na; ai++) {
-			a = ap[ai]
-			if (ai > 1) printf ","
-			printf "\"" a "\":{"
-			first = 1
-			for (si = 1; si <= ns; si++) {
-				s   = sc[si]
-				key = a SUBSEP s
-				if (!(key in count)) continue
-				if (!first) printf ","
-				first = 0
-				n    = count[key]
-				mean = ms_sum[key] / n
-				var  = (ms_sq[key] / n) - (mean * mean)
-				if (var < 0) var = 0
-				printf "\"" s "\":{"
-				printf "\"n\":%d,", n
-				printf "\"mean_disp_ms\":%.2f,", mean
-				printf "\"mean_total_ms\":%.2f,", total_ms_sum[key] / n
-				printf "\"mean_cpu_ms\":%.2f,", cpu_ms_sum[key] / n
-				printf "\"mean_total_cpu_ms\":%.2f,", total_cpu_ms_sum[key] / n
-				printf "\"stddev_disp_ms\":%.2f,", sqrt(var)
-				printf "\"mean_db_queries\":%.1f,", dbq_sum[key] / n
-				printf "\"mean_db_time_ms\":%.2f,", dbt_sum[key] / n
-				printf "\"mean_mem_mb\":%.2f,", peak_sum[key] / n / 1048576
-				printf "\"max_concurrent\":%d", max_conc[key]
-				printf "}"
-			}
-			printf "}"
-		}
-		printf "}"
-	}
-	')
-
 	local environment_name="${ENVIRONMENT_NAME:-${WP_URL}}"
 
-	local payload
-	payload=$(printf '{"environment_name":"%s","env":%s,"results":%s}' \
-		"${environment_name}" "${env_json}" "${results_json}")
-
+	# Aggregation and submission are handled server-side by the plugin endpoint.
 	printf 'Submitting results to %s ...\n' "${reporter_url}"
-	local http_code response
-	response=$(curl --silent --show-error \
-		-w '\n__HTTP_STATUS__:%{http_code}' \
-		-u "${reporter_user}:${reporter_pass}" \
+	local response http_code
+	response=$(curl "${BASE_CURL_OPTS[@]}" \
+		-X POST "${PLUGIN_SUBMIT_URL}" \
 		-H "Content-Type: application/json" \
-		-X POST "${reporter_url}/wp-json/wp-unit-test-api/v1/rtc-performance-results" \
-		-d "${payload}" 2>/dev/null) || { printf 'ERROR: curl request failed.\n'; return 1; }
+		-w '\n__HTTP_STATUS__:%{http_code}' \
+		-d "$(printf '{"reporter_url":"%s","reporter_user":"%s","reporter_pass":"%s","environment_name":"%s"}' \
+			"${reporter_url}" "${reporter_user}" "${reporter_pass}" "${environment_name}")" \
+		2>/dev/null) || { printf 'ERROR: curl request failed.\n'; return 1; }
 
 	http_code=$(printf '%s' "${response}" | grep '__HTTP_STATUS__' | grep -o '[0-9]*$')
 	response=$(printf '%s' "${response}" | grep -v '__HTTP_STATUS__')
 
 	case "${http_code}" in
-		2*)
-			printf 'Submitted successfully (HTTP %s).\n' "${http_code}" ;;
-		*)
-			printf 'ERROR: Submission failed (HTTP %s):\n  %s\n' "${http_code}" "${response}"
-			return 1 ;;
+		2*) printf 'Submitted successfully (HTTP %s).\n' "${http_code}" ;;
+		*)  printf 'ERROR: Submission failed (HTTP %s):\n  %s\n' "${http_code}" "${response}"
+		    return 1 ;;
 	esac
 }
 
@@ -2307,6 +2215,7 @@ case "${COMMAND}" in
 	compaction-trigger)     cmd_compaction_trigger ;;
 	concurrent)             cmd_concurrent ;;
 	sustain)                cmd_sustain ;;
+	env)                    cmd_env ;;
 	report)                 cmd_report ;;
 	report-all)             cmd_report_all ;;
 	submit-results)         cmd_submit_results ;;
@@ -2338,6 +2247,7 @@ case "${COMMAND}" in
 		printf '  compaction-trigger    Send updates until compaction fires, then compact\n'
 		printf '  concurrent            N_CLIENTS burst simultaneously, POLLS rounds (rendezvous-synced)\n'
 		printf '  sustain               N_CLIENTS independent pollers for DURATION seconds\n'
+		printf '  env                   Print environment snapshot (PHP, WP, DB, cache, etc.)\n'
 		printf '  report                Fetch log from plugin and print summary table\n'
 		printf '  report-all            Print summary table grouped by approach × scenario\n'
 		printf '  submit-results        POST all results to the reporter endpoint (requires REPORTER_* vars)\n'
