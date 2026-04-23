@@ -40,6 +40,7 @@ While the test runner supports a number of environment variables that adjust how
 - `WP_PATH`: This must be set to the absolute path of root directory for the test WordPress installation.
 - `REPORTER_URL`: The URL to report results to. In most cases, this should be the default of https://make.wordpress.org/hosting. But it can be the URL of any site running the [PHPUnit Test Reporter plugin](https://github.com/wordPress/phpunit-test-reporter).
 - `REPORTER_API_KEY`: The credentials of a reporting user on the `REPORTER_URL` site in the format of `username:application-password`.
+- `ENVIRONMENT_NAME`: A descriptive label of the environment running the tests. For example, "Performance Shared" or "Managed eCommerce". This will help contributors analyzing the data understand which type of environment the data comes from.
 
 Hosts participating in the [PHPUnit Hosting Tests](https://make.wordpress.org/hosting/test-results/) can reuse the same credentials for this test runner.
 
