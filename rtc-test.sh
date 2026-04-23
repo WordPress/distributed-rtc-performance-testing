@@ -1638,6 +1638,9 @@ cmd_submit_results() {
 		printf 'Skipping submission.\n'
 		return 0
 	fi
+	if [[ "${reporter_url}" != https://* ]]; then
+		die "REPORTER_URL must use HTTPS to protect credentials. Got: ${reporter_url}"
+	fi
 
 	local environment_name="${ENVIRONMENT_NAME:-${WP_URL}}"
 

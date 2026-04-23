@@ -756,6 +756,10 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 	$api_key          = $request->get_param( 'api_key' );    // username:password format
 	$environment_name = $request->get_param( 'environment_name' ) ?: get_option( 'siteurl' );
 
+	if ( 'https' !== wp_parse_url( $reporter_url, PHP_URL_SCHEME ) ) {
+		return new WP_Error( 'insecure_url', 'reporter_url must use HTTPS to protect credentials.', array( 'status' => 400 ) );
+	}
+
 	// Build environment snapshot.
 	$env = rtctest_get_env()->get_data();
 
