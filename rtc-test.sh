@@ -5,7 +5,7 @@
 #
 # Requirements: bash, curl
 # WP-CLI (wp) is used by setup/teardown if available; not needed for test commands.
-# python3 is required for the replay command only.
+# python3 is required for the capture-sanitize and replay commands only.
 #
 # Workflow A -- run everything on the web host (WP-CLI available):
 #   bash rtc-test.sh setup
@@ -67,16 +67,25 @@ if [ -f "${_env_file}" ]; then
 	_pre_nonce="${WP_NONCE:-}"
 	_pre_path="${WP_PATH:-}"
 	_pre_post="${POST_ID:-}"
+	_pre_approach="${APPROACH:-}"
+	_pre_reporter_url="${REPORTER_URL:-}"
+	_pre_api_key="${REPORTER_API_KEY:-}"
+	_pre_env_name="${ENVIRONMENT_NAME:-}"
 	# shellcheck source=/dev/null
 	. "${_env_file}"
-	[ -n "${_pre_url}"   ] && WP_URL="${_pre_url}"
-	[ -n "${_pre_user}"  ] && WP_USER="${_pre_user}"
-	[ -n "${_pre_pass}"  ] && WP_PASS="${_pre_pass}"
-	[ -n "${_pre_jar}"   ] && WP_COOKIE_JAR="${_pre_jar}"
-	[ -n "${_pre_nonce}" ] && WP_NONCE="${_pre_nonce}"
-	[ -n "${_pre_path}"  ] && WP_PATH="${_pre_path}"
-	[ -n "${_pre_post}"  ] && POST_ID="${_pre_post}"
-	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post
+	[ -n "${_pre_url}"          ] && WP_URL="${_pre_url}"
+	[ -n "${_pre_user}"         ] && WP_USER="${_pre_user}"
+	[ -n "${_pre_pass}"         ] && WP_PASS="${_pre_pass}"
+	[ -n "${_pre_jar}"          ] && WP_COOKIE_JAR="${_pre_jar}"
+	[ -n "${_pre_nonce}"        ] && WP_NONCE="${_pre_nonce}"
+	[ -n "${_pre_path}"         ] && WP_PATH="${_pre_path}"
+	[ -n "${_pre_post}"         ] && POST_ID="${_pre_post}"
+	[ -n "${_pre_approach}"     ] && APPROACH="${_pre_approach}"
+	[ -n "${_pre_reporter_url}" ] && REPORTER_URL="${_pre_reporter_url}"
+	[ -n "${_pre_api_key}"      ] && REPORTER_API_KEY="${_pre_api_key}"
+	[ -n "${_pre_env_name}"     ] && ENVIRONMENT_NAME="${_pre_env_name}"
+	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post \
+	      _pre_approach _pre_reporter_url _pre_api_key _pre_env_name
 fi
 unset _env_file
 
@@ -90,13 +99,14 @@ WP_PASS="${WP_PASS:-}"                                            # WP login pas
 WP_COOKIE_JAR="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"  # cookie jar path (set by setup)
 WP_NONCE="${WP_NONCE:-}"                                          # wp_rest nonce (set by setup, ~12h TTL)
 WP_PATH="${WP_PATH:-}"       # Absolute path to WordPress root; required by setup
-REQUIRED_WP_VERSION="${REQUIRED_WP_VERSION:-7.0-RC2}"   # WordPress version required by these tests
+REQUIRED_WP_VERSION="${REQUIRED_WP_VERSION:-nightly}"   # WordPress version required by these tests
 POST_ID="${POST_ID:-1}"
 POLLS="${POLLS:-10}"
 POLL_DELAY="${POLL_DELAY:-1}"   # Seconds between polls per client (0 = immediate re-poll / stress mode)
 N_CLIENTS="${N_CLIENTS:-3}"
 DURATION="${DURATION:-30}"      # Seconds to run for sustain command
 UPDATE_SIZE="${UPDATE_SIZE:-small}"
+APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
 
 # -------------------------------------------------------------------------
 # Deterministic test constants
@@ -150,11 +160,15 @@ BASE_CURL_OPTS=(
 	-H "X-RTC-Test: 1"
 	-H "Content-Type: application/json"
 )
+[ -n "${APPROACH}" ] && BASE_CURL_OPTS+=( -H "X-RTC-Approach: ${APPROACH}" )
 
 RTC_ENDPOINT="${WP_URL}/wp-json/wp-sync/v1/updates"
 PLUGIN_LOG_URL="${WP_URL}/wp-json/rtc-test/v1/log"
 PLUGIN_ENV_URL="${WP_URL}/wp-json/rtc-test/v1/env"
 PLUGIN_TABLE_URL="${WP_URL}/wp-json/rtc-test/v1/table"
+PLUGIN_REPORT_URL="${WP_URL}/wp-json/rtc-test/v1/report"
+PLUGIN_REPORT_ALL_URL="${WP_URL}/wp-json/rtc-test/v1/report-all"
+PLUGIN_SUBMIT_URL="${WP_URL}/wp-json/rtc-test/v1/submit"
 
 CAPTURE_SESSION_URL="${WP_URL}/wp-json/rtc-capture/v1/session"
 CAPTURE_SESSIONS_URL="${WP_URL}/wp-json/rtc-capture/v1/sessions"
@@ -203,13 +217,18 @@ do_get_nonce() {
 
 # rtc_post SCENARIO JSON_BODY
 # Posts to the RTC endpoint with the given scenario label.
+# Test metadata is sent as both request headers and query parameters so the
+# plugin can receive it even when a reverse proxy strips custom headers.
+# _wpnonce is sent in the URL as a fallback in case X-WP-Nonce is also stripped.
 # Prints the raw response body followed by __HTTP_STATUS__:NNN on its own line.
 rtc_post() {
 	local scenario="$1"
 	local body="$2"
+	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}&_wpnonce=${WP_NONCE}"
+	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
 	curl "${BASE_CURL_OPTS[@]}" \
 		-H "X-RTC-Scenario: ${scenario}" \
-		-X POST "${RTC_ENDPOINT}" \
+		-X POST "${url}" \
 		-w '\n__HTTP_STATUS__:%{http_code}' \
 		-d "${body}"
 }
@@ -222,12 +241,15 @@ rtc_post() {
 rtc_post_timed() {
 	local scenario="$1"
 	local body="$2"
+	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}&_wpnonce=${WP_NONCE}"
+	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
 	local timing
 	timing=$(curl "${BASE_CURL_OPTS[@]}" \
 		-H "X-RTC-Scenario: ${scenario}" \
-		-X POST "${RTC_ENDPOINT}" \
+		-X POST "${url}" \
 		-d "${body}" \
 		-w '\n__CURL_TIME__:%{time_namelookup}:%{time_connect}:%{time_appconnect}:%{time_pretransfer}:%{time_starttransfer}:%{time_total}' \
+		-D /tmp/rtctest_last_headers.txt \
 		-o /tmp/rtctest_last_response.json 2>&1) || true
 	cat /tmp/rtctest_last_response.json
 	# Parse the six timing fields and derive the four useful deltas.
@@ -372,11 +394,28 @@ print_header() {
 
 # ensure_wp_version -- verify the installed WordPress version matches
 # REQUIRED_WP_VERSION; download and install it via WP-CLI if not.
+# When REQUIRED_WP_VERSION is "nightly", any alpha/beta/RC build is accepted
+# and a fresh nightly is only downloaded if nothing is installed yet.
 # Pass all WP-CLI flags as arguments (e.g. --path=... --allow-root --url=...).
 ensure_wp_version() {
 	local current
 	current="$(wp "$@" core version 2>/dev/null)" \
 		|| { printf 'ERROR: Could not read WordPress version via WP-CLI.\n'; return 1; }
+
+	if [ "${REQUIRED_WP_VERSION}" = "nightly" ]; then
+		# Any pre-release build satisfies the nightly requirement.  Re-download
+		# only if the site reports no version at all.
+		if [ -n "${current}" ]; then
+			printf 'WordPress:      %s (nightly or later accepted)\n' "${current}"
+			return 0
+		fi
+		printf 'WordPress:      not installed. Downloading nightly...\n'
+		wp "$@" core download --version=nightly --skip-content \
+			|| { printf 'ERROR: WP nightly download failed.\n'; return 1; }
+		wp "$@" core update-db \
+			|| printf 'WARNING: Database update step failed or was not needed.\n'
+		return 0
+	fi
 
 	if [ "${current}" = "${REQUIRED_WP_VERSION}" ]; then
 		printf 'WordPress:      %s (matches required version)\n' "${current}"
@@ -414,6 +453,219 @@ cmd_ensure_wp_version() {
 	[ -n "${WP_URL:-}" ] && WP_FLAGS+=( "--url=${WP_URL}" )
 
 	ensure_wp_version "${WP_FLAGS[@]}"
+}
+
+# -------------------------------------------------------------------------
+# Approach helpers
+# -------------------------------------------------------------------------
+
+# approach_patch_file APPROACH -- prints the absolute patch file path, or empty
+# string if the approach is the RC2 baseline (no patch required).
+approach_patch_file() {
+	case "$1" in
+		custom-table)         printf '%s' "${SCRIPT_DIR}/patches/02-custom-table.patch" ;;
+		post-meta-transients) printf '%s' "${SCRIPT_DIR}/patches/03-post-meta-transients.patch" ;;
+		custom-table-with-transients)  printf '%s' "${SCRIPT_DIR}/patches/04-custom-table-with-transients.patch" ;;
+		*)                    printf '' ;;  # post-meta (RC2 baseline) or empty
+	esac
+}
+
+# approach_has_schema_change APPROACH -- returns 0 if the approach adds the
+# wp_collaboration table (requires wp core update-db and table teardown).
+approach_has_schema_change() {
+	case "$1" in
+		custom-table|custom-table-with-transients) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# _build_wp_flags -- populates a local array named WP_FLAGS from the current
+# environment. Call as: local WP_FLAGS=(); _build_wp_flags
+_build_wp_flags() {
+	[ "$(id -u)" = "0" ] && WP_FLAGS+=( "--allow-root" )
+	WP_FLAGS+=( "--path=${WP_PATH}" )
+	[ -n "${WP_URL:-}" ] && WP_FLAGS+=( "--url=${WP_URL}" )
+}
+
+# _clear_rtc_data WP_FLAGS... -- deletes all RTC collaboration data so the next
+# approach starts from a clean state. Handles all three storage types safely:
+# post meta rows, the collaboration table (if present), and awareness transients.
+_clear_rtc_data() {
+	printf 'Clearing RTC collaboration data...\n'
+	wp "$@" eval '
+		global $wpdb;
+
+		// Remove post meta rows written by the post-meta storage implementation.
+		$deleted = (int) $wpdb->query(
+			"DELETE FROM {$wpdb->postmeta}
+			 WHERE meta_key IN (\"wp_sync_update\", \"wp_sync_awareness_state\")"
+		);
+		echo "  Post meta RTC rows deleted: {$deleted}\n";
+
+		// Truncate the collaboration table if it exists (custom-table approaches).
+		$collab = $wpdb->prefix . "collaboration";
+		$exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $collab ) );
+		if ( $exists ) {
+			$wpdb->query( "TRUNCATE TABLE `{$collab}`" );
+			echo "  Collaboration table truncated.\n";
+		}
+
+		// Remove awareness transients (post-meta-transients approach).
+		$deleted = (int) $wpdb->query(
+			"DELETE FROM {$wpdb->options}
+			 WHERE option_name LIKE \"_transient_wp_sync_awareness%\"
+			    OR option_name LIKE \"_transient_timeout_wp_sync_awareness%\""
+		);
+		if ( $deleted > 0 ) {
+			echo "  Awareness transients deleted: {$deleted}\n";
+		}
+	' 2>/dev/null || printf '  WARNING: Could not clear RTC data via WP-CLI.\n'
+}
+
+
+cmd_apply_approach() {
+	local approach="${1:-}"
+	[ -n "${approach}" ] || die "Usage: bash rtc-test.sh apply-approach <approach>
+  Approaches: post-meta  custom-table  post-meta-transients  custom-table-with-transients"
+
+	case "${approach}" in
+		post-meta|custom-table|post-meta-transients|custom-table-with-transients) ;;
+		*) die "Unknown approach '${approach}'. Valid: post-meta  custom-table  post-meta-transients  custom-table-with-transients" ;;
+	esac
+
+	print_header "apply-approach (${approach})"
+	command -v wp >/dev/null 2>&1 || die "WP-CLI is required for apply-approach."
+	[ -n "${WP_PATH:-}" ] || die "WP_PATH is not set. Add it to your .env file."
+
+	local WP_FLAGS=()
+	_build_wp_flags
+
+	# Step 1: Reset to a clean nightly build so every approach starts from identical files.
+	printf 'Downloading WordPress nightly...\n'
+	wp "${WP_FLAGS[@]}" core download --force --version=nightly --skip-content \
+		|| die "Failed to download WordPress nightly."
+
+	# Step 2: Re-copy the MU-plugin (nightly download does not touch wp-content, but
+	# re-copying ensures the plugin version matches this repo).
+	local mu_dir="${WP_PATH}/wp-content/mu-plugins"
+	mkdir -p "${mu_dir}"
+	cp "${SCRIPT_DIR}/rtc-test.php" "${mu_dir}/rtc-test.php" \
+		&& printf 'MU-plugin:      re-copied\n' \
+		|| printf 'WARNING: Could not re-copy MU-plugin.\n'
+
+	# Step 3: Baseline DB upgrade (nightly may carry a newer schema than what is in the DB).
+	wp "${WP_FLAGS[@]}" core update-db >/dev/null 2>&1 || true
+
+	# Step 4: Apply the approach's patch (post-meta is the nightly baseline, no patch needed).
+	local new_patch
+	new_patch="$(approach_patch_file "${approach}")"
+	if [ -n "${new_patch}" ]; then
+		[ -f "${new_patch}" ] || die "Patch file not found: ${new_patch}"
+
+		# Remove any files that this patch would create fresh.  wp core download
+		# does not delete files that are absent from the nightly package, so files
+		# added by a previous approach's patch would still be on disk and cause
+		# patch to detect an "already exists" conflict.
+		# New-file hunks have "--- /dev/null" as their source; the destination line
+		# is "+++ b/src/<path>" which, with -p2, maps to <path> under WP_PATH.
+		local _del_count=0
+		while IFS= read -r _rel; do
+			local _target="${WP_PATH}/${_rel}"
+			if [ -f "${_target}" ]; then
+				rm -f "${_target}"
+				_del_count=$(( _del_count + 1 ))
+			fi
+		done < <(grep -A1 '^--- /dev/null' "${new_patch}" \
+		         | grep '^\+\+\+ ' \
+		         | sed 's|^\+\+\+ b/src/||')
+		[ "${_del_count}" -gt 0 ] && \
+			printf 'Removed %d file(s) added by a previous patch.\n' "${_del_count}"
+
+		printf 'Applying patch for %s...\n' "${approach}"
+		local _fwd_dry
+		if ! _fwd_dry=$(patch --dry-run --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" 2>&1); then
+			printf '%s\n' "${_fwd_dry}"
+			die "Patch dry-run failed. The patch context does not match the nightly files.
+  Check which file/hunk is listed above."
+		fi
+		patch --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" \
+			|| die "Patch failed. WordPress files may be in an inconsistent state."
+		printf 'Patch applied.\n'
+	else
+		printf 'Approach %s is the nightly baseline — no patch needed.\n' "${approach}"
+	fi
+
+	# Step 5: Run DB upgrade again if the approach introduces a schema change (adds the
+	# wp_collaboration table).  wp_is_collaboration_enabled() requires db_version >= 61841.
+	if approach_has_schema_change "${approach}"; then
+		printf 'Running database upgrade (adds collaboration table)...\n'
+		wp "${WP_FLAGS[@]}" core update-db || die "Database upgrade failed."
+		local db_ver
+		db_ver="$(wp "${WP_FLAGS[@]}" option get db_version 2>/dev/null)"
+		if [ "${db_ver:-0}" -ge 61841 ] 2>/dev/null; then
+			printf 'Database:       version %s (collaboration table ready)\n' "${db_ver}"
+		else
+			printf 'WARNING: db_version is %s, expected >= 61841. RTC may not activate.\n' "${db_ver}"
+		fi
+	fi
+
+	# Step 6: Clear all RTC data so this run starts from a clean state.
+	_clear_rtc_data "${WP_FLAGS[@]}"
+
+	# Step 7: Flush the object cache.
+	wp "${WP_FLAGS[@]}" cache flush 2>/dev/null \
+		&& printf 'Object cache:   flushed\n' \
+		|| printf 'Object cache:   no external cache to flush\n'
+
+	# Step 8: Ensure RTC is enabled.
+	wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1 \
+		&& printf 'RTC:            enabled\n' \
+		|| printf 'WARNING: Could not enable RTC. Verify in Settings > Writing.\n'
+
+	printf '\nApproach "%s" is ready. Run tests with APPROACH="%s".\n' \
+		"${approach}" "${approach}"
+}
+
+cmd_reset_approach() {
+	print_header "reset-approach"
+	command -v wp >/dev/null 2>&1 || die "WP-CLI is required for reset-approach."
+	[ -n "${WP_PATH:-}" ] || die "WP_PATH is not set. Add it to your .env file."
+
+	local WP_FLAGS=()
+	_build_wp_flags
+
+	printf 'Downloading WordPress nightly...\n'
+	wp "${WP_FLAGS[@]}" core download --force --version=nightly --skip-content \
+		|| die "Failed to download WordPress nightly."
+
+	# Remove any files added by approach patches — wp core download leaves them behind.
+	local _patch_file _del_count=0 _rel _target
+	for _patch_file in "${SCRIPT_DIR}/patches/"*.patch; do
+		[ -f "${_patch_file}" ] || continue
+		while IFS= read -r _rel; do
+			_target="${WP_PATH}/${_rel}"
+			if [ -f "${_target}" ]; then
+				rm -f "${_target}"
+				_del_count=$(( _del_count + 1 ))
+			fi
+		done < <(grep -A1 '^--- /dev/null' "${_patch_file}" \
+		         | grep '^\+\+\+ ' \
+		         | sed 's|^\+\+\+ b/src/||')
+	done
+	[ "${_del_count}" -gt 0 ] && \
+		printf 'Removed %d file(s) added by approach patches.\n' "${_del_count}"
+
+	local mu_dir="${WP_PATH}/wp-content/mu-plugins"
+	mkdir -p "${mu_dir}"
+	cp "${SCRIPT_DIR}/rtc-test.php" "${mu_dir}/rtc-test.php" \
+		&& printf 'MU-plugin:      re-copied\n' \
+		|| printf 'WARNING: Could not re-copy MU-plugin.\n'
+
+	wp "${WP_FLAGS[@]}" core update-db >/dev/null 2>&1 || true
+	wp "${WP_FLAGS[@]}" cache flush 2>/dev/null || true
+	wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1 || true
+
+	printf '\nReset to clean nightly.\n'
 }
 
 # -------------------------------------------------------------------------
@@ -550,6 +802,31 @@ setup_wpcli() {
 		printf 'RTC:            enabled\n'
 	else
 		printf 'RTC:            could not update option -- verify in Settings > Writing\n'
+	fi
+
+	# Enable SAVEQUERIES so the plugin can record per-request DB time.
+	if wp "${WP_FLAGS[@]}" config set SAVEQUERIES true --raw >/dev/null 2>&1; then
+		printf 'SAVEQUERIES:    enabled in wp-config.php\n'
+	else
+		die "Could not set SAVEQUERIES in wp-config.php. Ensure the file is writable and re-run setup."
+	fi
+
+	# Gutenberg must not be active during tests — it ships its own RTC implementation
+	# that would interfere with the approaches under test.
+	if wp "${WP_FLAGS[@]}" plugin is-installed gutenberg >/dev/null 2>&1; then
+		printf 'Gutenberg:      installed\n'
+		if wp "${WP_FLAGS[@]}" plugin is-active gutenberg >/dev/null 2>&1; then
+			printf 'Gutenberg:      active -- deactivating...\n'
+			if wp "${WP_FLAGS[@]}" plugin deactivate gutenberg >/dev/null 2>&1; then
+				printf 'Gutenberg:      deactivated\n'
+			else
+				die "Could not deactivate Gutenberg. Deactivate it manually and re-run setup."
+			fi
+		else
+			printf 'Gutenberg:      not active\n'
+		fi
+	else
+		printf 'Gutenberg:      not installed\n'
 	fi
 
 	# Write generated values to .env (or .env.example if .env does not exist yet).
@@ -712,7 +989,7 @@ cmd_baseline() {
 		total_ms=$((total_ms + ms))
 		total_srv=$((total_srv + server_ms))
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 	printf 'mean: total_ms=%s server_ms=%s\n' "$((total_ms / POLLS))" "$((total_srv / POLLS))"
 	printf '\nNote: baseline requests are NOT tagged with X-RTC-Test.\n'
@@ -751,6 +1028,29 @@ cmd_single_idle() {
 				printf '  the correct metric to compare across environments.\n'
 			fi
 			check_rtc_response "${resp_json}" "single-idle" || return 1
+
+			# Verify the plugin's monitoring hook activated and data was written.
+			# X-RTC-Test-Active: hook ran; X-RTC-DB-Insert: row was inserted.
+			local _hook_active=0 _db_inserted=0 _db_error=""
+			if [ -f /tmp/rtctest_last_headers.txt ]; then
+				grep -qi 'x-rtc-test-active' /tmp/rtctest_last_headers.txt && _hook_active=1
+				grep -qi 'x-rtc-db-insert: 1' /tmp/rtctest_last_headers.txt && _db_inserted=1
+				_db_error=$(grep -i 'x-rtc-db-error:' /tmp/rtctest_last_headers.txt \
+					| head -1 | sed 's/.*x-rtc-db-error: *//i' | tr -d '\r' || true)
+			fi
+			if [ "${_hook_active}" = "1" ] && [ "${_db_inserted}" = "1" ]; then
+				printf 'Plugin logging: ACTIVE (hook ran, row inserted)\n'
+			elif [ "${_hook_active}" = "1" ]; then
+				printf 'Plugin logging: HOOK RAN but DB INSERT FAILED.\n'
+				[ -n "${_db_error}" ] && printf '  MySQL error: %s\n' "${_db_error}"
+				printf '  Check the PHP error log on the server for details.\n'
+			else
+				printf 'Plugin logging: NOT ACTIVE -- no X-RTC-Test-Active header in response.\n'
+				printf '  rtctest_post_dispatch did not run. Possible causes:\n'
+				printf '  1. rtc-test.php in mu-plugins is outdated (re-run setup or apply-approach).\n'
+				printf '  2. Proxy is blocking both headers AND query params from reaching PHP.\n'
+				printf '  3. MU plugin is not loaded (check wp-content/mu-plugins/rtc-test.php).\n'
+			fi
 		fi
 
 		local new_cursor
@@ -766,7 +1066,7 @@ cmd_single_idle() {
 			"${i}" "${cursor}" "${awareness}" "${total_updates}" "${client_ms}" "${server_ms}" "${tls_ms}"
 
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -812,7 +1112,7 @@ cmd_two_idle() {
 			"${cursor_b}" "${awareness_b}" "${b_sees_a}"
 
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -929,7 +1229,7 @@ cmd_one_idle_one_editing() {
 			"${ms_b}" "${server_ms_b}" "${cursor_b}" "${updates_delivered}"
 
 		i=$((i + 1))
-		[ "${i}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -973,7 +1273,7 @@ cmd_n_idle() {
 		done
 		printf '\n'
 		round=$((round + 1))
-		[ "${round}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${round}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 }
 
@@ -1142,7 +1442,7 @@ cmd_concurrent() {
 		rm -rf "${tmpdir}"
 
 		round=$(( round + 1 ))
-		[ "${round}" -le "${POLLS}" ] && sleep "${POLL_DELAY}"
+		if [ "${round}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 	printf '\nRun: bash rtc-test.sh report\n'
 	printf 'The "conc" column shows max simultaneous workers seen by the plugin.\n'
@@ -1249,158 +1549,120 @@ cmd_sustain() {
 	printf 'Key columns: tot_cpu_ms (full request CPU), conc (max simultaneous workers).\n'
 }
 
-cmd_report() {
-	print_header "report"
-	require_auth
-
-	# Fetch environment fingerprint.
-	printf 'Environment:\n'
+# print_env -- fetch and display environment snapshot as a table.
+# No header; suitable for embedding in other commands.
+print_env() {
 	local env
 	env=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_ENV_URL}" 2>/dev/null) || true
-	if [ -n "${env}" ]; then
-		# The REST API returns compact single-line JSON. Split on commas first so
-		# each key:value pair lands on its own line, then strip braces and quotes.
-		printf '%s' "${env}" | tr ',' '\n' | awk '
-		{
-			gsub(/[{}"]/, "")
-			if (match($0, /php_version:/))           printf "  PHP:              %s\n", substr($0, RSTART+12)
-			if (match($0, /wp_version:/))            printf "  WordPress:        %s\n", substr($0, RSTART+11)
-			if (match($0, /db_version:/))            printf "  DB:               %s\n", substr($0, RSTART+11)
-			if (match($0, /gutenberg_version:/))     printf "  Gutenberg:        %s\n", substr($0, RSTART+18)
-			if (match($0, /gutenberg_active:/))      printf "  Gutenberg active: %s\n", substr($0, RSTART+17)
-			if (match($0, /ext_object_cache:/))      printf "  Ext object cache: %s\n", substr($0, RSTART+17)
-			if (match($0, /savequeries:/))           printf "  SAVEQUERIES:      %s\n", substr($0, RSTART+12)
-			if (match($0, /compaction_threshold:/))  printf "  Compact at:       %s updates\n", substr($0, RSTART+21)
-			if (match($0, /awareness_timeout_s:/))   printf "  Awareness TTL:    %s s\n", substr($0, RSTART+20)
-			if (match($0, /storage_backend:/))       printf "  Storage:          %s\n", substr($0, RSTART+16)
-			if (match($0, /storage_post_type:/))     printf "  Storage post type:%s\n", substr($0, RSTART+18)
-		}
-		'
-	else
+	if [ -z "${env}" ]; then
 		printf '  (could not reach rtc-test/v1/env -- is the plugin active?)\n'
-	fi
-
-	# Fetch log.
-	printf '\nFetching log from %s ...\n' "${PLUGIN_LOG_URL}"
-	local log
-	log=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_LOG_URL}" 2>/dev/null) || true
-
-	if [ -z "${log}" ] || [ "${log}" = "[]" ]; then
-		printf 'No log entries found.\n'
 		return
 	fi
+	# The REST API returns compact single-line JSON. Split on commas so each
+	# key:value pair lands on its own line, then strip braces and quotes.
+	printf '%s' "${env}" | tr ',' '\n' | awk '
+	{
+		gsub(/[{}"]/, "")
+		if (match($0, /php_version:/))           printf "  %-22s %s\n", "PHP:",          substr($0, RSTART+12)
+		if (match($0, /wp_version:/))            printf "  %-22s %s\n", "WordPress:",    substr($0, RSTART+11)
+		if (match($0, /db_version:/))            printf "  %-22s %s\n", "Database:",     substr($0, RSTART+11)
+		if (match($0, /object_cache_type:/))     printf "  %-22s %s\n", "Object cache:", substr($0, RSTART+18)
+		if (match($0, /savequeries:/))           printf "  %-22s %s\n", "SAVEQUERIES:",      substr($0, RSTART+12)
+		if (match($0, /compaction_threshold:/))  printf "  %-22s %s updates\n", "Compact at:", substr($0, RSTART+21)
+		if (match($0, /awareness_timeout_s:/))   printf "  %-22s %s s\n", "Awareness TTL:",  substr($0, RSTART+20)
+	}
+	'
+}
 
-	# A WordPress error response is a JSON object (starts with '{'), not an array.
-	# This happens when the user lacks permission or the plugin is not active.
-	case "${log}" in
-		'{'*)
-			printf 'ERROR: log endpoint returned an error, not log data:\n'
-			printf '  %s\n' "${log}"
+cmd_env() {
+	print_header "env"
+	require_auth
+	print_env
+}
+
+# _print_report_text DATA
+# Extracts and prints the pre-formatted "text" field from a {"text":"..."} JSON
+# response returned by /rtc-test/v1/report or /rtc-test/v1/report-all.
+_print_report_text() {
+	local data="$1"
+	if [ -z "${data}" ]; then
+		printf 'No response from server.\n'
+		return 1
+	fi
+	# A WordPress error response has a "code" field rather than "text".
+	case "${data}" in
+		*'"code"'*)
+			printf 'ERROR: %s\n' "${data}"
 			printf '\nPossible causes:\n'
 			printf '  1. Plugin not active: copy rtc-test.php to wp-content/mu-plugins/\n'
 			printf '  2. User lacks edit_posts capability\n'
-			return 1
-			;;
+			return 1 ;;
 	esac
+	# Extract the "text" value and unescape JSON \n sequences.
+	local text
+	text=$(printf '%s' "${data}" | awk -F'"text":"' 'NF>1{ s=$2; sub(/".*$/, "", s); gsub(/\\n/, "\n", s); printf "%s", s }')
+	if [ -z "${text}" ]; then
+		printf 'No log entries found.\n'
+		return
+	fi
+	printf '%s\n' "${text}"
+}
 
-	# Parse log with awk: compute per-scenario stats.
-	# Each JSON entry is on one line; we extract fields with pattern matching.
-	# Uses only POSIX/mawk-compatible awk (no gawk 3-arg match or gensub).
+cmd_report() {
+	print_header "report"
+	require_auth
+	printf 'Environment:\n'
+	print_env
 	printf '\nPer-scenario summary:\n'
-	printf '%s' "${log}" | awk '
-	# extract_str: pull a quoted-string value for "key":"value" fields.
-	function extract_str(s, key,    pat, val) {
-		pat = "\"" key "\":\""
-		if (!match(s, pat "[^\"]+\"")) return "unknown"
-		val = substr(s, RSTART + length(pat), RLENGTH - length(pat) - 1)
-		return val
-	}
-	# extract_num: pull a numeric value for "key":number fields.
-	function extract_num(s, key,    pat) {
-		pat = "\"" key "\":[0-9.]+"
-		if (!match(s, pat)) return 0
-		return substr(s, RSTART + length(key) + 3, RLENGTH - length(key) - 3) + 0
-	}
-	{
-		# We process the full log as one line, splitting on "},{" boundaries.
-		n = split($0, entries, /\},\{/)
-		for (i = 1; i <= n; i++) {
-			e = entries[i]
-			scenario = extract_str(e, "scenario")
-			ms            = extract_num(e, "ms")
-			total_ms      = extract_num(e, "total_ms")
-			cpu_ms        = extract_num(e, "cpu_ms")
-			total_cpu_ms  = extract_num(e, "total_cpu_ms")
-			dbq  = extract_num(e, "db_queries")
-			dbt  = extract_num(e, "db_time_ms")
-			peak = extract_num(e, "peak_memory")
-			ui   = extract_num(e, "updates_in")
-			uo   = extract_num(e, "updates_out")
-			sc   = (match(e, /"should_compact":true/) ? 1 : 0)
-			conc = extract_num(e, "concurrent")
+	local data
+	data=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_REPORT_URL}" 2>/dev/null) || true
+	_print_report_text "${data}"
+}
 
-			count[scenario]++
-			ms_sum[scenario]           += ms
-			ms_sq[scenario]            += ms * ms
-			total_ms_sum[scenario]     += total_ms
-			cpu_ms_sum[scenario]       += cpu_ms
-			total_cpu_ms_sum[scenario] += total_cpu_ms
-			dbq_sum[scenario]      += dbq
-			dbt_sum[scenario]      += dbt
-			peak_sum[scenario]     += peak
-			ui_sum[scenario]       += ui
-			uo_sum[scenario]       += uo
-			sc_sum[scenario]       += sc
-			if (conc > max_conc[scenario]) max_conc[scenario] = conc
-		}
-	}
-	END {
-		# Print header.
-		# disp_ms       = rest_pre..post (endpoint logic only)
-		# total_ms      = REQUEST_TIME_FLOAT..post (full worker occupancy incl. WP bootstrap + auth)
-		# cpu_ms        = getrusage() delta across dispatch only
-		# total_cpu_ms  = getrusage() delta from MU-plugin load to post_dispatch (full request CPU)
-		# mem_mb        = mean PHP peak memory for the request (MB)
-		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
-			"Scenario", "n", "disp_ms", "total_ms", "cpu_ms", "tot_cpu_ms", "sd_disp", "db_q", "db_t_ms", "mem_mb", "ui_tot", "uo_tot", "sc", "conc"
-		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
-			"", "", "avg", "avg", "avg", "avg", "stddev", "avg", "avg", "avg", "sum", "sum", "sum", "max"
-		printf "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n",
-			"----------------------", "------", "--------", "--------",
-			"--------", "-----------", "--------", "--------", "--------", "------", "------", "------", "----", "----"
+cmd_report_all() {
+	print_header "report-all"
+	require_auth
+	local data
+	data=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_REPORT_ALL_URL}" 2>/dev/null) || true
+	_print_report_text "${data}"
+}
 
-		# Compute baseline mean for ratio column.
-		baseline_mean = 0
-		if ("baseline" in count && count["baseline"] > 0)
-			baseline_mean = ms_sum["baseline"] / count["baseline"]
+cmd_submit_results() {
+	print_header "submit-results"
+	require_auth
 
-		for (s in count) {
-			n    = count[s]
-			mean = ms_sum[s] / n
-			var  = (ms_sq[s] / n) - (mean * mean)
-			if (var < 0) var = 0
-			std  = sqrt(var)
-			printf "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6.1f %6d %6d %5d %5d\n",
-				s, n, mean, total_ms_sum[s] / n, cpu_ms_sum[s] / n,
-				total_cpu_ms_sum[s] / n, std,
-				dbq_sum[s] / n,
-				dbt_sum[s] / n,
-				peak_sum[s] / n / 1048576,
-				ui_sum[s], uo_sum[s],
-				sc_sum[s],
-				max_conc[s]
-		}
+	local reporter_url="${REPORTER_URL:-}"
+	local api_key="${REPORTER_API_KEY:-}"
+	if [ -z "${reporter_url}" ] || [ -z "${api_key}" ]; then
+		printf 'REPORTER_URL and REPORTER_API_KEY must be set to submit results.\n'
+		printf 'Skipping submission.\n'
+		return 0
+	fi
+	if [[ "${reporter_url}" != https://* ]]; then
+		die "REPORTER_URL must use HTTPS to protect credentials. Got: ${reporter_url}"
+	fi
 
-		if (baseline_mean > 0) {
-			printf "\nRatio to baseline (disp_ms / baseline_disp_ms = %.1f):\n", baseline_mean
-			for (s in count) {
-				if (s == "baseline") continue
-				mean = ms_sum[s] / count[s]
-				printf "  %-22s %.2fx\n", s, mean / baseline_mean
-			}
-		}
-	}
-	'
+	local environment_name="${ENVIRONMENT_NAME:-${WP_URL}}"
+
+	# Aggregation and submission are handled server-side by the plugin endpoint.
+	printf 'Submitting results to %s ...\n' "${reporter_url}"
+	local response http_code
+	response=$(curl "${BASE_CURL_OPTS[@]}" \
+		-X POST "${PLUGIN_SUBMIT_URL}" \
+		-H "Content-Type: application/json" \
+		-w '\n__HTTP_STATUS__:%{http_code}' \
+		-d "$(printf '{"reporter_url":"%s","api_key":"%s","environment_name":"%s"}' \
+			"${reporter_url}" "${api_key}" "${environment_name}")" \
+		2>/dev/null) || { printf 'ERROR: curl request failed.\n'; return 1; }
+
+	http_code=$(printf '%s' "${response}" | grep '__HTTP_STATUS__' | grep -o '[0-9]*$')
+	response=$(printf '%s' "${response}" | grep -v '__HTTP_STATUS__')
+
+	case "${http_code}" in
+		2*) printf 'Submitted successfully (HTTP %s).\n' "${http_code}" ;;
+		*)  printf 'ERROR: Submission failed (HTTP %s):\n  %s\n' "${http_code}" "${response}"
+		    return 1 ;;
+	esac
 }
 
 cmd_clear() {
@@ -1757,6 +2019,8 @@ COMMAND="${1:-}"
 case "${COMMAND}" in
 	setup)                  cmd_setup ;;
 	ensure-wp-version)      cmd_ensure_wp_version ;;
+	apply-approach)         cmd_apply_approach "${2:-}" ;;
+	reset-approach)         cmd_reset_approach ;;
 	teardown)               cmd_teardown ;;
 	refresh-auth)           cmd_refresh_auth ;;
 	baseline)               cmd_baseline ;;
@@ -1768,7 +2032,10 @@ case "${COMMAND}" in
 	compaction-trigger)     cmd_compaction_trigger ;;
 	concurrent)             cmd_concurrent ;;
 	sustain)                cmd_sustain ;;
+	env)                    cmd_env ;;
 	report)                 cmd_report ;;
+	report-all)             cmd_report_all ;;
+	submit-results)         cmd_submit_results ;;
 	clear)                  cmd_clear ;;
 	reset)                  cmd_reset ;;
 	seed)                   cmd_seed ;;
@@ -1784,6 +2051,8 @@ case "${COMMAND}" in
 		printf 'Commands:\n'
 		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
 		printf '  ensure-wp-version     Verify WordPress %s is installed; update via WP-CLI if not\n' "${REQUIRED_WP_VERSION}"
+		printf '  apply-approach <name> Download nightly, apply approach patch, clear RTC data\n'
+		printf '  reset-approach        Download nightly and return to a clean unpatched state\n'
 		printf '  teardown              Delete test post, remove cookie jar, strip generated .env section\n'
 		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
 		printf '  baseline              Measure ambient WP REST overhead (run first)\n'
@@ -1795,7 +2064,10 @@ case "${COMMAND}" in
 		printf '  compaction-trigger    Send updates until compaction fires, then compact\n'
 		printf '  concurrent            N_CLIENTS burst simultaneously, POLLS rounds (rendezvous-synced)\n'
 		printf '  sustain               N_CLIENTS independent pollers for DURATION seconds\n'
+		printf '  env                   Print environment snapshot (PHP, WP, DB, cache, etc.)\n'
 		printf '  report                Fetch log from plugin and print summary table\n'
+		printf '  report-all            Print summary table grouped by approach × scenario\n'
+		printf '  submit-results        POST all results to the reporter endpoint (requires REPORTER_* vars)\n'
 		printf '  clear                 Delete all log entries (table stays, schema intact)\n'
 		printf '  reset                 Drop the log table entirely (recreated on next tagged request)\n'
 		printf '\nCapture commands (require rtc-capture.php in mu-plugins):\n'
@@ -1821,6 +2093,7 @@ case "${COMMAND}" in
 		printf '  N_CLIENTS     Clients for n-idle/concurrent/sustain (default: 3)\n'
 		printf '  DURATION      Seconds to run for sustain (default: 30)\n'
 		printf '  UPDATE_SIZE   small|medium|large payload (default: small)\n'
+		printf '  APPROACH              Storage approach label written to the log (e.g. post-meta, custom-table)\n'
 		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
 		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'
 		exit 1

@@ -30,10 +30,10 @@ unset( $_rtctest_ru );
 
 define( 'RTC_TEST_ENV_OPTION',        'rtc_test_env' );
 define( 'RTC_TEST_CONCURRENT_OPTION', 'rtc_test_concurrent' );
-define( 'RTC_TEST_DB_VERSION',        '1' );
-define( 'RTC_TEST_LOG_MAX',           500 );
+define( 'RTC_TEST_DB_VERSION',        '3' );
 define( 'RTC_TEST_REQUEST_HEADER',    'HTTP_X_RTC_TEST' );
 define( 'RTC_TEST_SCENARIO_HEADER',   'HTTP_X_RTC_SCENARIO' );
+define( 'RTC_TEST_APPROACH_HEADER',   'HTTP_X_RTC_APPROACH' );
 
 // -------------------------------------------------------------------------
 // Monitor: table helpers
@@ -45,43 +45,67 @@ function rtctest_log_table() {
 }
 
 function rtctest_ensure_table() {
+	global $wpdb;
+	$table = rtctest_log_table();
+
+	// Fast path: version option matches AND the table physically exists with the
+	// correct schema.  We spot-check the 'approach' column (added in version 3)
+	// to catch tables left behind by an older version of this plugin.
 	if ( get_option( 'rtctest_db_version' ) === RTC_TEST_DB_VERSION ) {
-		return;
+		$col = $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'approach'" ); // phpcs:ignore
+		if ( null !== $col ) {
+			return; // Table exists and has the current schema.
+		}
 	}
 
-	global $wpdb;
-	$table           = rtctest_log_table();
+	// Schema is missing or out of date.  Drop and recreate so the schema is
+	// always correct.  This table holds only test measurements — correctness of
+	// the schema matters more than preserving rows from an incompatible version.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.SchemaChange
+	$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" ); // phpcs:ignore
+	delete_option( 'rtctest_db_version' );
+
 	$charset_collate = $wpdb->get_charset_collate();
 
-	$sql = "CREATE TABLE IF NOT EXISTS {$table} (
-  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  ts int(11) NOT NULL DEFAULT 0,
-  scenario varchar(100) NOT NULL DEFAULT 'unknown',
-  ms float NOT NULL DEFAULT 0,
-  total_ms float NOT NULL DEFAULT 0,
-  cpu_ms float NOT NULL DEFAULT 0,
-  total_cpu_ms float NOT NULL DEFAULT 0,
-  db_queries int(11) NOT NULL DEFAULT 0,
-  db_time_ms float NOT NULL DEFAULT 0,
-  memory_delta bigint(20) NOT NULL DEFAULT 0,
-  peak_memory bigint(20) NOT NULL DEFAULT 0,
-  status int(11) NOT NULL DEFAULT 200,
-  rooms int(11) NOT NULL DEFAULT 0,
-  updates_in int(11) NOT NULL DEFAULT 0,
-  updates_out int(11) NOT NULL DEFAULT 0,
-  response_bytes int(11) NOT NULL DEFAULT 0,
-  awareness_count int(11) NOT NULL DEFAULT 0,
-  should_compact tinyint(1) NOT NULL DEFAULT 0,
-  total_updates int(11) NOT NULL DEFAULT 0,
-  concurrent int(11) NOT NULL DEFAULT 0,
-  PRIMARY KEY  (id),
-  KEY scenario (scenario),
-  KEY ts (ts)
-) {$charset_collate};";
+	// Use a direct CREATE TABLE query instead of dbDelta() to avoid dbDelta()'s
+	// strict SQL-formatting requirements, which can cause silent failures.
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.SchemaChange
+	$wpdb->query(
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		"CREATE TABLE `{$table}` (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			ts int(11) NOT NULL DEFAULT 0,
+			approach varchar(60) NOT NULL DEFAULT '',
+			scenario varchar(100) NOT NULL DEFAULT 'unknown',
+			ms float NOT NULL DEFAULT 0,
+			total_ms float NOT NULL DEFAULT 0,
+			cpu_ms float NOT NULL DEFAULT 0,
+			total_cpu_ms float NOT NULL DEFAULT 0,
+			db_queries int(11) NOT NULL DEFAULT 0,
+			db_time_ms float NOT NULL DEFAULT 0,
+			memory_delta bigint(20) NOT NULL DEFAULT 0,
+			peak_memory bigint(20) NOT NULL DEFAULT 0,
+			status int(11) NOT NULL DEFAULT 200,
+			rooms int(11) NOT NULL DEFAULT 0,
+			updates_in int(11) NOT NULL DEFAULT 0,
+			updates_out int(11) NOT NULL DEFAULT 0,
+			response_bytes int(11) NOT NULL DEFAULT 0,
+			awareness_count int(11) NOT NULL DEFAULT 0,
+			should_compact tinyint(1) NOT NULL DEFAULT 0,
+			total_updates int(11) NOT NULL DEFAULT 0,
+			concurrent int(11) NOT NULL DEFAULT 0,
+			PRIMARY KEY (id),
+			KEY approach_scenario (approach, scenario),
+			KEY ts (ts)
+		) {$charset_collate}"
+	);
 
-	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-	dbDelta( $sql );
-	update_option( 'rtctest_db_version', RTC_TEST_DB_VERSION, true );
+	// Only mark the version current if the table was actually created.
+	if ( null !== $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'approach'" ) ) { // phpcs:ignore
+		update_option( 'rtctest_db_version', RTC_TEST_DB_VERSION, true );
+	} else {
+		error_log( '[rtctest] Failed to create table ' . $table . ': ' . $wpdb->last_error );
+	}
 }
 
 function rtctest_drop_table() {
@@ -101,7 +125,14 @@ add_filter( 'rest_pre_dispatch',  'rtctest_pre_dispatch',  10, 3 );
 add_filter( 'rest_post_dispatch', 'rtctest_post_dispatch', 10, 3 );
 
 function rtctest_pre_dispatch( $result, $server, $request ) {
-	if ( ! isset( $_SERVER[ RTC_TEST_REQUEST_HEADER ] ) ) {
+	// Accept the tag from three sources, in order of reliability:
+	//   1. HTTP header (blocked by some reverse proxies)
+	//   2. PHP $_GET superglobal (never filtered by WordPress)
+	//   3. WP_REST_Request::get_param() (goes through WP param processing)
+	$tagged = isset( $_SERVER[ RTC_TEST_REQUEST_HEADER ] )
+	       || '1' === ( $_GET['_rtctest'] ?? '' )
+	       || '1' === (string) $request->get_param( '_rtctest' );
+	if ( ! $tagged ) {
 		return $result;
 	}
 	if ( false === strpos( $request->get_route(), '/wp-sync/' ) ) {
@@ -154,7 +185,11 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 
 	$scenario = isset( $_SERVER[ RTC_TEST_SCENARIO_HEADER ] )
 		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_SCENARIO_HEADER ] ) )
-		: 'unknown';
+		: sanitize_text_field( (string) ( $request->get_param( '_rtcscenario' ) ?? 'unknown' ) );
+
+	$approach = isset( $_SERVER[ RTC_TEST_APPROACH_HEADER ] )
+		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_APPROACH_HEADER ] ) )
+		: sanitize_text_field( (string) ( $request->get_param( '_rtcapproach' ) ?? '' ) );
 
 	$data      = $response->get_data();
 	$rooms_in  = $request->get_param( 'rooms' ) ?? array();
@@ -178,34 +213,64 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 	$total_updates  = isset( $first_room_out['total_updates'] ) ? (int) $first_room_out['total_updates'] : 0;
 	$response_bytes = strlen( wp_json_encode( $data ) );
 
-	$wpdb->insert(
-		rtctest_log_table(),
-		array(
-			'ts'              => time(),
-			'scenario'        => $scenario,
-			'ms'              => $wall_ms,
-			'total_ms'        => $total_ms,
-			'cpu_ms'          => $cpu_ms,
-			'total_cpu_ms'    => $total_cpu_ms,
-			'db_queries'      => $db_queries,
-			'db_time_ms'      => $db_time_ms,
-			'memory_delta'    => $memory_delta,
-			'peak_memory'     => memory_get_peak_usage( true ),
-			'status'          => $response->get_status(),
-			'rooms'           => count( $rooms_in ),
-			'updates_in'      => $updates_in,
-			'updates_out'     => $updates_out,
-			'response_bytes'  => $response_bytes,
-			'awareness_count' => $awareness_count,
-			'should_compact'  => $should_compact ? 1 : 0,
-			'total_updates'   => $total_updates,
-			'concurrent'      => $GLOBALS['rtctest_concurrent_at_start'],
-		),
-		array(
-			'%d', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
-			'%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d',
-		)
+	// Build the row data and format array once so we can retry if the first
+	// insert fails (e.g. because the table was dropped while the db_version
+	// option remained set, causing rtctest_ensure_table() to skip creation).
+	$row_data = array(
+		'ts'              => time(),
+		'approach'        => $approach,
+		'scenario'        => $scenario,
+		'ms'              => $wall_ms,
+		'total_ms'        => $total_ms,
+		'cpu_ms'          => $cpu_ms,
+		'total_cpu_ms'    => $total_cpu_ms,
+		'db_queries'      => $db_queries,
+		'db_time_ms'      => $db_time_ms,
+		'memory_delta'    => $memory_delta,
+		'peak_memory'     => memory_get_peak_usage( true ),
+		'status'          => $response->get_status(),
+		'rooms'           => count( $rooms_in ),
+		'updates_in'      => $updates_in,
+		'updates_out'     => $updates_out,
+		'response_bytes'  => $response_bytes,
+		'awareness_count' => $awareness_count,
+		'should_compact'  => $should_compact ? 1 : 0,
+		'total_updates'   => $total_updates,
+		'concurrent'      => $GLOBALS['rtctest_concurrent_at_start'],
 	);
+	$row_fmt = array(
+		'%d', '%s', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
+		'%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d',
+	);
+
+	$inserted  = $wpdb->insert( rtctest_log_table(), $row_data, $row_fmt );
+	$db_error  = $wpdb->last_error;
+
+	if ( false === $inserted ) {
+		// Insert failed — most likely the table was dropped while the
+		// rtctest_db_version option remained set (so ensure_table was a no-op).
+		// Reset the version flag, recreate the table, and retry once.
+		error_log( '[rtctest] insert failed: ' . $db_error . ' — recreating table.' );
+		delete_option( 'rtctest_db_version' );
+		rtctest_ensure_table();
+		$inserted = $wpdb->insert( rtctest_log_table(), $row_data, $row_fmt );
+		$db_error = $wpdb->last_error;
+		if ( false === $inserted ) {
+			error_log( '[rtctest] insert retry failed: ' . $db_error );
+		}
+	}
+
+	// Diagnostic response headers — visible in curl -D output for debugging:
+	//   X-RTC-Test-Active: 1  → hook executed (always set when we reach here)
+	//   X-RTC-DB-Insert:   1  → row was written; 0 → insert failed
+	//   X-RTC-DB-Error:    …  → MySQL error on insert failure (URL-encoded)
+	if ( $response instanceof WP_REST_Response ) {
+		$response->header( 'X-RTC-Test-Active', '1' );
+		$response->header( 'X-RTC-DB-Insert', false !== $inserted ? '1' : '0' );
+		if ( false === $inserted && '' !== $db_error ) {
+			$response->header( 'X-RTC-DB-Error', rawurlencode( substr( $db_error, 0, 300 ) ) );
+		}
+	}
 
 	unset(
 		$GLOBALS['rtctest_wall_start'],
@@ -284,16 +349,15 @@ function rtctest_register_routes() {
 				'methods'             => WP_REST_Server::READABLE,
 				'callback'            => static function() {
 					global $wpdb;
+					// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 					$rows = $wpdb->get_results(
-						$wpdb->prepare(
-							'SELECT * FROM ' . rtctest_log_table() . ' ORDER BY id ASC LIMIT %d',
-							RTC_TEST_LOG_MAX
-						),
+						'SELECT * FROM ' . rtctest_log_table() . ' ORDER BY id ASC',
 						ARRAY_A
 					);
 					foreach ( $rows as &$row ) {
 						$row['id']              = (int) $row['id'];
 						$row['ts']              = (int) $row['ts'];
+						$row['approach']        = (string) $row['approach'];
 						$row['ms']              = (float) $row['ms'];
 						$row['total_ms']        = (float) $row['total_ms'];
 						$row['cpu_ms']          = (float) $row['cpu_ms'];
@@ -352,19 +416,314 @@ function rtctest_register_routes() {
 			'permission_callback' => $cap_check,
 		)
 	);
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/report',
+		array(
+			'methods'             => WP_REST_Server::READABLE,
+			'callback'            => 'rtctest_rest_report',
+			'permission_callback' => $cap_check,
+		)
+	);
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/report-all',
+		array(
+			'methods'             => WP_REST_Server::READABLE,
+			'callback'            => 'rtctest_rest_report_all',
+			'permission_callback' => $cap_check,
+		)
+	);
+
+	register_rest_route(
+		'rtc-test/v1',
+		'/submit',
+		array(
+			'methods'             => WP_REST_Server::CREATABLE,
+			'callback'            => 'rtctest_rest_submit',
+			'permission_callback' => $cap_check,
+			'args'                => array(
+				'reporter_url'     => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'esc_url_raw',
+				),
+				'api_key'          => array(
+					'required'          => true,
+					'type'              => 'string',
+					'description'       => 'Reporter credentials in username:password format (REPORTER_API_KEY).',
+					'sanitize_callback' => 'sanitize_text_field',
+				),
+				'environment_name' => array(
+					'required'          => false,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+				),
+			),
+		)
+	);
+}
+
+// -------------------------------------------------------------------------
+// Monitor: report helpers
+// -------------------------------------------------------------------------
+
+/**
+ * Aggregate log rows by scenario and return a pre-formatted table as {"text":"..."}.
+ * Columns: scenario, n, mean disp_ms, mean total_ms, mean cpu_ms, mean tot_cpu_ms,
+ *          stddev disp_ms, mean db_queries, mean db_time_ms, mean mem_mb,
+ *          updates_in sum, updates_out sum, should_compact sum, max concurrent.
+ */
+function rtctest_rest_report() {
+	global $wpdb;
+
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$rows = $wpdb->get_results(
+		'SELECT scenario, ms, total_ms, cpu_ms, total_cpu_ms, db_queries, db_time_ms,'
+		. ' peak_memory, updates_in, updates_out, should_compact, concurrent'
+		. ' FROM ' . rtctest_log_table() . ' ORDER BY id ASC',
+		ARRAY_A
+	);
+
+	if ( empty( $rows ) ) {
+		return rest_ensure_response( array( 'text' => '' ) );
+	}
+
+	$agg = array();
+	foreach ( $rows as $row ) {
+		$s = $row['scenario'];
+		if ( ! isset( $agg[ $s ] ) ) {
+			$agg[ $s ] = array(
+				'n'                  => 0,
+				'ms_sum'             => 0.0,
+				'ms_sq_sum'          => 0.0,
+				'total_ms_sum'       => 0.0,
+				'cpu_ms_sum'         => 0.0,
+				'total_cpu_ms_sum'   => 0.0,
+				'db_queries_sum'     => 0.0,
+				'db_time_ms_sum'     => 0.0,
+				'peak_memory_sum'    => 0.0,
+				'updates_in_sum'     => 0,
+				'updates_out_sum'    => 0,
+				'should_compact_sum' => 0,
+				'max_concurrent'     => 0,
+			);
+		}
+		$a  = &$agg[ $s ];
+		$ms = (float) $row['ms'];
+		$a['n']++;
+		$a['ms_sum']             += $ms;
+		$a['ms_sq_sum']          += $ms * $ms;
+		$a['total_ms_sum']       += (float) $row['total_ms'];
+		$a['cpu_ms_sum']         += (float) $row['cpu_ms'];
+		$a['total_cpu_ms_sum']   += (float) $row['total_cpu_ms'];
+		$a['db_queries_sum']     += (float) $row['db_queries'];
+		$a['db_time_ms_sum']     += (float) $row['db_time_ms'];
+		$a['peak_memory_sum']    += (float) $row['peak_memory'];
+		$a['updates_in_sum']     += (int) $row['updates_in'];
+		$a['updates_out_sum']    += (int) $row['updates_out'];
+		$a['should_compact_sum'] += (int) $row['should_compact'];
+		if ( (int) $row['concurrent'] > $a['max_concurrent'] ) {
+			$a['max_concurrent'] = (int) $row['concurrent'];
+		}
+		unset( $a );
+	}
+
+	$fmt_h = "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n";
+	$fmt_r = "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6.1f %6d %6d %5d %5d\n";
+
+	$out  = sprintf( $fmt_h, 'Scenario', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'mem_mb', 'ui_tot', 'uo_tot', 'sc', 'conc' );
+	$out .= sprintf( $fmt_h, '', '', 'avg', 'avg', 'avg', 'avg', 'stddev', 'avg', 'avg', 'avg', 'sum', 'sum', 'sum', 'max' );
+	$out .= sprintf( $fmt_h,
+		str_repeat( '-', 22 ), str_repeat( '-', 6 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 11 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 6 ),
+		str_repeat( '-', 6 ),  str_repeat( '-', 6 ),
+		str_repeat( '-', 5 ),  str_repeat( '-', 5 )
+	);
+
+	$baseline_mean = 0.0;
+	foreach ( $agg as $name => $a ) {
+		$n    = $a['n'];
+		$mean = $a['ms_sum'] / $n;
+		$var  = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+		$out .= sprintf( $fmt_r,
+			$name, $n, $mean,
+			$a['total_ms_sum'] / $n,
+			$a['cpu_ms_sum'] / $n,
+			$a['total_cpu_ms_sum'] / $n,
+			sqrt( $var ),
+			$a['db_queries_sum'] / $n,
+			$a['db_time_ms_sum'] / $n,
+			$a['peak_memory_sum'] / $n / 1048576,
+			$a['updates_in_sum'],
+			$a['updates_out_sum'],
+			$a['should_compact_sum'],
+			$a['max_concurrent']
+		);
+		if ( 'baseline' === $name ) {
+			$baseline_mean = $mean;
+		}
+	}
+
+	if ( $baseline_mean > 0.0 ) {
+		$out .= sprintf( "\nRatio to baseline (disp_ms / baseline_disp_ms = %.1f):\n", $baseline_mean );
+		foreach ( $agg as $name => $a ) {
+			if ( 'baseline' === $name ) {
+				continue;
+			}
+			$out .= sprintf( "  %-22s %.2fx\n", $name, ( $a['ms_sum'] / $a['n'] ) / $baseline_mean );
+		}
+	}
+
+	return rest_ensure_response( array( 'text' => rtrim( $out ) ) );
+}
+
+/**
+ * Aggregate log rows by approach × scenario and return a pre-formatted table
+ * per approach as {"text":"..."}.
+ */
+function rtctest_rest_report_all() {
+	global $wpdb;
+
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$rows = $wpdb->get_results(
+		'SELECT approach, scenario, ms, total_ms, cpu_ms, total_cpu_ms,'
+		. ' db_queries, db_time_ms, peak_memory, concurrent'
+		. ' FROM ' . rtctest_log_table() . ' ORDER BY id ASC',
+		ARRAY_A
+	);
+
+	if ( empty( $rows ) ) {
+		return rest_ensure_response( array( 'text' => '' ) );
+	}
+
+	$agg = array();
+	foreach ( $rows as $row ) {
+		$approach = '' !== $row['approach'] ? $row['approach'] : '(untagged)';
+		$scenario = $row['scenario'];
+		if ( ! isset( $agg[ $approach ][ $scenario ] ) ) {
+			$agg[ $approach ][ $scenario ] = array(
+				'n'                => 0,
+				'ms_sum'           => 0.0,
+				'ms_sq_sum'        => 0.0,
+				'total_ms_sum'     => 0.0,
+				'cpu_ms_sum'       => 0.0,
+				'total_cpu_ms_sum' => 0.0,
+				'db_queries_sum'   => 0.0,
+				'db_time_ms_sum'   => 0.0,
+				'peak_memory_sum'  => 0.0,
+				'max_concurrent'   => 0,
+			);
+		}
+		$a  = &$agg[ $approach ][ $scenario ];
+		$ms = (float) $row['ms'];
+		$a['n']++;
+		$a['ms_sum']           += $ms;
+		$a['ms_sq_sum']        += $ms * $ms;
+		$a['total_ms_sum']     += (float) $row['total_ms'];
+		$a['cpu_ms_sum']       += (float) $row['cpu_ms'];
+		$a['total_cpu_ms_sum'] += (float) $row['total_cpu_ms'];
+		$a['db_queries_sum']   += (float) $row['db_queries'];
+		$a['db_time_ms_sum']   += (float) $row['db_time_ms'];
+		$a['peak_memory_sum']  += (float) $row['peak_memory'];
+		if ( (int) $row['concurrent'] > $a['max_concurrent'] ) {
+			$a['max_concurrent'] = (int) $row['concurrent'];
+		}
+		unset( $a );
+	}
+
+	$fmt_h = "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n";
+	$fmt_r = "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6d\n";
+	$sep_h = sprintf( $fmt_h,
+		str_repeat( '-', 22 ), str_repeat( '-', 6 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 11 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),  str_repeat( '-', 6 )
+	);
+
+	$out = '';
+	foreach ( $agg as $approach => $scenarios ) {
+		$out .= sprintf( "\n── Approach: %s ──\n", $approach );
+		$out .= sprintf( $fmt_h, 'Scenario', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'conc' );
+		$out .= $sep_h;
+
+		$baseline_mean = 0.0;
+		if ( isset( $scenarios['baseline'] ) ) {
+			$b             = $scenarios['baseline'];
+			$baseline_mean = $b['ms_sum'] / $b['n'];
+		}
+
+		foreach ( $scenarios as $name => $a ) {
+			$n    = $a['n'];
+			$mean = $a['ms_sum'] / $n;
+			$var  = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+			$out .= sprintf( $fmt_r,
+				$name, $n, $mean,
+				$a['total_ms_sum'] / $n,
+				$a['cpu_ms_sum'] / $n,
+				$a['total_cpu_ms_sum'] / $n,
+				sqrt( $var ),
+				$a['db_queries_sum'] / $n,
+				$a['db_time_ms_sum'] / $n,
+				$a['max_concurrent']
+			);
+		}
+
+		if ( $baseline_mean > 0.0 ) {
+			$out .= "\n  Ratio to baseline (disp_ms):\n";
+			foreach ( $scenarios as $name => $a ) {
+				if ( 'baseline' === $name ) {
+					continue;
+				}
+				$out .= sprintf( "    %-22s %.2fx\n", $name, ( $a['ms_sum'] / $a['n'] ) / $baseline_mean );
+			}
+		}
+	}
+
+	return rest_ensure_response( array( 'text' => ltrim( $out ) ) );
+}
+
+function rtctest_detect_object_cache_type() {
+	global $wp_object_cache;
+
+	if ( ! wp_using_ext_object_cache() ) {
+		return 'default'; // WP's built-in non-persistent in-memory cache.
+	}
+
+	// Popular Redis drop-ins set one of these constants.
+	if ( defined( 'WP_REDIS_VERSION' ) ) {
+		return 'redis'; // Redis Object Cache plugin (Till Krüss).
+	}
+	if ( defined( 'WP_REDIS_OBJECT_CACHE' ) ) {
+		return 'redis'; // WP Redis (Pantheon / Human Made).
+	}
+
+	// Memcached drop-in (bundled with WordPress.com / Automattic).
+	if ( defined( 'WP_CACHE_KEY_SALT' ) && class_exists( 'Memcached' ) ) {
+		return 'memcached';
+	}
+	if ( class_exists( 'Memcache' ) ) {
+		return 'memcache';
+	}
+
+	// Fall back to the actual class name — captures everything else.
+	// Note: some drop-ins reuse the class name WP_Object_Cache even for
+	// Redis/Memcached backends, which is why the constant checks come first.
+	if ( isset( $wp_object_cache ) && is_object( $wp_object_cache ) ) {
+		return 'ext:' . get_class( $wp_object_cache );
+	}
+
+	return 'ext:unknown';
 }
 
 function rtctest_get_env() {
 	global $wpdb;
-
-	if ( ! function_exists( 'get_plugins' ) ) {
-		require_once ABSPATH . 'wp-admin/includes/plugin.php';
-	}
-	$gutenberg_file    = 'gutenberg/gutenberg.php';
-	$all_plugins       = get_plugins();
-	$gutenberg_data    = $all_plugins[ $gutenberg_file ] ?? null;
-	$gutenberg_version = $gutenberg_data ? $gutenberg_data['Version'] : 'not-found';
-	$gutenberg_active  = is_plugin_active( $gutenberg_file );
 
 	$compaction_threshold = class_exists( 'WP_HTTP_Polling_Sync_Server' )
 		? WP_HTTP_Polling_Sync_Server::COMPACTION_THRESHOLD
@@ -372,29 +731,145 @@ function rtctest_get_env() {
 	$awareness_timeout_s = class_exists( 'WP_HTTP_Polling_Sync_Server' )
 		? WP_HTTP_Polling_Sync_Server::AWARENESS_TIMEOUT
 		: null;
-	$storage_backend   = class_exists( 'WP_Sync_Post_Meta_Storage' ) ? 'post_meta' : 'unknown';
-	$storage_post_type = class_exists( 'WP_Sync_Post_Meta_Storage' )
-		? WP_Sync_Post_Meta_Storage::POST_TYPE
-		: null;
 
 	$env = array(
 		'php_version'          => PHP_VERSION,
 		'wp_version'           => get_bloginfo( 'version' ),
 		'db_version'           => $wpdb->db_version(),
-		'gutenberg_version'    => $gutenberg_version,
-		'gutenberg_active'     => $gutenberg_active,
 		'ext_object_cache'     => wp_using_ext_object_cache(),
+		'object_cache_type'    => rtctest_detect_object_cache_type(),
 		'savequeries'          => defined( 'SAVEQUERIES' ) && SAVEQUERIES,
 		'compaction_threshold' => $compaction_threshold,
 		'awareness_timeout_s'  => $awareness_timeout_s,
-		'storage_backend'      => $storage_backend,
-		'storage_post_type'    => $storage_post_type,
 		'captured_at'          => time(),
 	);
 
 	update_option( RTC_TEST_ENV_OPTION, $env, false );
 
 	return rest_ensure_response( $env );
+}
+
+function rtctest_rest_submit( WP_REST_Request $request ) {
+	global $wpdb;
+
+	$reporter_url     = $request->get_param( 'reporter_url' );
+	$api_key          = $request->get_param( 'api_key' );    // username:password format
+	$environment_name = $request->get_param( 'environment_name' ) ?: get_option( 'siteurl' );
+
+	if ( 'https' !== wp_parse_url( $reporter_url, PHP_URL_SCHEME ) ) {
+		return new WP_Error( 'insecure_url', 'reporter_url must use HTTPS to protect credentials.', array( 'status' => 400 ) );
+	}
+
+	// Build environment snapshot.
+	$env = rtctest_get_env()->get_data();
+
+	// Fetch all log rows.
+	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	$rows = $wpdb->get_results(
+		'SELECT approach, scenario, ms, total_ms, cpu_ms, total_cpu_ms, db_queries, db_time_ms, peak_memory, concurrent'
+		. ' FROM ' . rtctest_log_table(),
+		ARRAY_A
+	);
+
+	if ( empty( $rows ) ) {
+		return new WP_Error( 'no_data', 'No log entries to submit.', array( 'status' => 400 ) );
+	}
+
+	// Aggregate by approach × scenario.
+	$agg = array();
+	foreach ( $rows as $row ) {
+		$approach = '' !== $row['approach'] ? $row['approach'] : 'untagged';
+		$scenario = $row['scenario'];
+		if ( ! isset( $agg[ $approach ][ $scenario ] ) ) {
+			$agg[ $approach ][ $scenario ] = array(
+				'n'                => 0,
+				'ms_sum'           => 0.0,
+				'ms_sq_sum'        => 0.0,
+				'total_ms_sum'     => 0.0,
+				'cpu_ms_sum'       => 0.0,
+				'total_cpu_ms_sum' => 0.0,
+				'db_queries_sum'   => 0.0,
+				'db_time_ms_sum'   => 0.0,
+				'peak_memory_sum'  => 0.0,
+				'max_concurrent'   => 0,
+			);
+		}
+		$s  = &$agg[ $approach ][ $scenario ];
+		$ms = (float) $row['ms'];
+		$s['n']++;
+		$s['ms_sum']           += $ms;
+		$s['ms_sq_sum']        += $ms * $ms;
+		$s['total_ms_sum']     += (float) $row['total_ms'];
+		$s['cpu_ms_sum']       += (float) $row['cpu_ms'];
+		$s['total_cpu_ms_sum'] += (float) $row['total_cpu_ms'];
+		$s['db_queries_sum']   += (float) $row['db_queries'];
+		$s['db_time_ms_sum']   += (float) $row['db_time_ms'];
+		$s['peak_memory_sum']  += (float) $row['peak_memory'];
+		if ( (int) $row['concurrent'] > $s['max_concurrent'] ) {
+			$s['max_concurrent'] = (int) $row['concurrent'];
+		}
+		unset( $s );
+	}
+
+	// Build results structure.
+	$results = array();
+	foreach ( $agg as $approach => $scenarios ) {
+		$results[ $approach ] = array();
+		foreach ( $scenarios as $scenario => $s ) {
+			$n    = $s['n'];
+			$mean = $s['ms_sum'] / $n;
+			$var  = max( 0.0, ( $s['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+			$results[ $approach ][ $scenario ] = array(
+				'n'                 => $n,
+				'mean_disp_ms'      => round( $mean, 2 ),
+				'mean_total_ms'     => round( $s['total_ms_sum'] / $n, 2 ),
+				'mean_cpu_ms'       => round( $s['cpu_ms_sum'] / $n, 2 ),
+				'mean_total_cpu_ms' => round( $s['total_cpu_ms_sum'] / $n, 2 ),
+				'stddev_disp_ms'    => round( sqrt( $var ), 2 ),
+				'mean_db_queries'   => round( $s['db_queries_sum'] / $n, 1 ),
+				'mean_db_time_ms'   => round( $s['db_time_ms_sum'] / $n, 2 ),
+				'mean_mem_mb'       => round( $s['peak_memory_sum'] / $n / 1048576, 2 ),
+				'max_concurrent'    => $s['max_concurrent'],
+			);
+		}
+	}
+
+	$response = wp_remote_post(
+		rtrim( $reporter_url, '/' ) . '/wp-json/wp-unit-test-api/v1/rtc-performance-results',
+		array(
+			'headers' => array(
+				'Content-Type'  => 'application/json',
+				'Authorization' => 'Basic ' . base64_encode( $api_key ),
+			),
+			'body'    => wp_json_encode( array(
+				'environment_name' => $environment_name,
+				'env'              => $env,
+				'results'          => $results,
+			) ),
+			'timeout' => 30,
+		)
+	);
+
+	if ( is_wp_error( $response ) ) {
+		return new WP_Error( 'submit_failed', $response->get_error_message(), array( 'status' => 502 ) );
+	}
+
+	$http_code = wp_remote_retrieve_response_code( $response );
+	$body      = wp_remote_retrieve_body( $response );
+
+	if ( $http_code < 200 || $http_code >= 300 ) {
+		return new WP_Error(
+			'reporter_error',
+			sprintf( 'Reporter returned HTTP %d: %s', $http_code, $body ),
+			array( 'status' => 502 )
+		);
+	}
+
+	return rest_ensure_response( array(
+		'submitted' => true,
+		'http_code' => $http_code,
+		'response'  => json_decode( $body, true ) ?? $body,
+	) );
 }
 
 // -------------------------------------------------------------------------
@@ -408,219 +883,6 @@ function rtctest_ajax_nonce() {
 		wp_die( 'Forbidden', '', array( 'response' => 403 ) );
 	}
 	wp_send_json( array( 'nonce' => wp_create_nonce( 'wp_rest' ) ) );
-}
-
-// -------------------------------------------------------------------------
-// Monitor: admin page (Tools > RTC Tests)
-// -------------------------------------------------------------------------
-
-add_action( 'admin_menu', 'rtctest_admin_menu' );
-
-function rtctest_admin_menu() {
-	add_management_page(
-		'RTC Test Monitor',
-		'RTC Tests',
-		'manage_options',
-		'rtc-test-monitor',
-		'rtctest_admin_page'
-	);
-}
-
-function rtctest_admin_page() {
-	if ( ! current_user_can( 'manage_options' ) ) {
-		return;
-	}
-
-	global $wpdb;
-	$table = rtctest_log_table();
-
-	if ( isset( $_POST['rtctest_clear'] ) && check_admin_referer( 'rtctest_settings' ) ) {
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$wpdb->query( "DELETE FROM {$table}" );
-		echo '<div class="notice notice-success"><p>Log cleared.</p></div>';
-	}
-
-	if ( isset( $_POST['rtctest_reset'] ) && check_admin_referer( 'rtctest_settings' ) ) {
-		rtctest_drop_table();
-		echo '<div class="notice notice-success"><p>Table dropped. It will be recreated on the next tagged request.</p></div>';
-	}
-
-	$log_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );  // phpcs:ignore
-	$log       = $wpdb->get_results(
-		$wpdb->prepare( "SELECT * FROM {$table} ORDER BY id ASC LIMIT %d", RTC_TEST_LOG_MAX ),
-		ARRAY_A
-	);
-
-	$scenarios = array();
-	foreach ( $log as $entry ) {
-		$s = $entry['scenario'];
-		if ( ! isset( $scenarios[ $s ] ) ) {
-			$scenarios[ $s ] = array(
-				'count'            => 0,
-				'ms_sum'           => 0.0,
-				'ms_sq_sum'        => 0.0,
-				'cpu_ms_sum'       => 0.0,
-				'total_cpu_ms_sum' => 0.0,
-				'db_queries_sum'   => 0,
-				'db_time_sum'      => 0.0,
-				'updates_in_sum'   => 0,
-				'updates_out_sum'  => 0,
-				'compact_count'    => 0,
-				'max_concurrent'   => 0,
-			);
-		}
-		$r  = &$scenarios[ $s ];
-		$r['count']++;
-		$r['ms_sum']           += (float) $entry['ms'];
-		$r['ms_sq_sum']        += (float) $entry['ms'] * (float) $entry['ms'];
-		$r['cpu_ms_sum']       += (float) $entry['cpu_ms'];
-		$r['total_cpu_ms_sum'] += (float) $entry['total_cpu_ms'];
-		$r['db_queries_sum']   += (int) $entry['db_queries'];
-		$r['db_time_sum']      += (float) $entry['db_time_ms'];
-		$r['updates_in_sum']   += (int) $entry['updates_in'];
-		$r['updates_out_sum']  += (int) $entry['updates_out'];
-		if ( ! empty( $entry['should_compact'] ) ) {
-			$r['compact_count']++;
-		}
-		if ( (int) $entry['concurrent'] > $r['max_concurrent'] ) {
-			$r['max_concurrent'] = (int) $entry['concurrent'];
-		}
-	}
-
-	$baseline_mean = 0.0;
-	if ( isset( $scenarios['baseline'] ) && $scenarios['baseline']['count'] > 0 ) {
-		$baseline_mean = $scenarios['baseline']['ms_sum'] / $scenarios['baseline']['count'];
-	}
-
-	$recent = $wpdb->get_results(
-		"SELECT * FROM {$table} ORDER BY id DESC LIMIT 50", // phpcs:ignore
-		ARRAY_A
-	);
-
-	?>
-	<div class="wrap">
-		<h1>RTC Test Monitor</h1>
-
-		<form method="post">
-			<?php wp_nonce_field( 'rtctest_settings' ); ?>
-			<p>
-				<input type="submit" name="rtctest_clear" class="button" value="Clear Log (<?php echo esc_attr( $log_count ); ?> rows)"
-					onclick="return confirm('Delete all <?php echo esc_attr( $log_count ); ?> log rows? Table structure is preserved.');" />
-				<input type="submit" name="rtctest_reset" class="button" value="Drop Table"
-					onclick="return confirm('Drop the log table entirely? It will be recreated on the next tagged request.');"
-					style="margin-left:8px;" />
-			</p>
-		</form>
-
-		<h2>Summary (<?php echo esc_html( $log_count ); ?> total rows<?php echo $log_count > RTC_TEST_LOG_MAX ? ', showing last ' . RTC_TEST_LOG_MAX : ''; ?>)</h2>
-
-		<?php if ( empty( $scenarios ) ) : ?>
-			<p>No test data yet. Run <code>rtc-test.sh</code> with tagged requests to populate this log.</p>
-		<?php else : ?>
-			<table class="widefat striped">
-				<thead>
-					<tr>
-						<th>Scenario</th>
-						<th>Requests</th>
-						<th>Mean disp_ms</th>
-						<th>Mean cpu_ms</th>
-						<th>Mean tot_cpu_ms</th>
-						<th>Stddev disp_ms</th>
-						<?php if ( $baseline_mean > 0 ) : ?><th>disp_ms / baseline</th><?php endif; ?>
-						<th>Mean DB queries</th>
-						<th>Mean DB time ms</th>
-						<th>Updates in (sum)</th>
-						<th>Updates out (sum)</th>
-						<th>Compact triggers</th>
-						<th>Max concurrent</th>
-					</tr>
-				</thead>
-				<tbody>
-				<?php foreach ( $scenarios as $name => $r ) : ?>
-					<?php
-					$count             = $r['count'];
-					$mean_ms           = round( $r['ms_sum'] / $count, 2 );
-					$mean_cpu_ms       = round( $r['cpu_ms_sum'] / $count, 2 );
-					$mean_total_cpu_ms = round( $r['total_cpu_ms_sum'] / $count, 2 );
-					$variance          = ( $r['ms_sq_sum'] / $count ) - ( $mean_ms * $mean_ms );
-					$stddev_ms         = round( sqrt( max( 0.0, $variance ) ), 2 );
-					$mean_db_q         = round( $r['db_queries_sum'] / $count, 1 );
-					$mean_db_t         = round( $r['db_time_sum'] / $count, 2 );
-					$ratio             = $baseline_mean > 0 ? round( $mean_ms / $baseline_mean, 2 ) : null;
-					?>
-					<tr>
-						<td><?php echo esc_html( $name ); ?></td>
-						<td><?php echo esc_html( $count ); ?></td>
-						<td><?php echo esc_html( $mean_ms ); ?></td>
-						<td><?php echo esc_html( $mean_cpu_ms ); ?></td>
-						<td><?php echo esc_html( $mean_total_cpu_ms ); ?></td>
-						<td><?php echo esc_html( $stddev_ms ); ?></td>
-						<?php if ( $baseline_mean > 0 ) : ?>
-							<td><?php echo null !== $ratio ? esc_html( $ratio ) . 'x' : '-'; ?></td>
-						<?php endif; ?>
-						<td><?php echo esc_html( $mean_db_q ); ?></td>
-						<td><?php echo esc_html( $mean_db_t ); ?></td>
-						<td><?php echo esc_html( $r['updates_in_sum'] ); ?></td>
-						<td><?php echo esc_html( $r['updates_out_sum'] ); ?></td>
-						<td><?php echo esc_html( $r['compact_count'] ); ?></td>
-						<td><?php echo esc_html( $r['max_concurrent'] ); ?></td>
-					</tr>
-				<?php endforeach; ?>
-				</tbody>
-			</table>
-		<?php endif; ?>
-
-		<h2>Recent Entries (last 50, newest first)</h2>
-		<table class="widefat striped" style="font-size:12px;">
-			<thead>
-				<tr>
-					<th>Time</th>
-					<th>Scenario</th>
-					<th>disp_ms</th>
-					<th>total_ms</th>
-					<th>cpu_ms</th>
-					<th>tot_cpu_ms</th>
-					<th>DB queries</th>
-					<th>DB time ms</th>
-					<th>Peak mem (MB)</th>
-					<th>Mem delta (KB)</th>
-					<th>Status</th>
-					<th>Updates in</th>
-					<th>Updates out</th>
-					<th>Resp bytes</th>
-					<th>Awareness</th>
-					<th>Total updates</th>
-					<th>Compact?</th>
-					<th>Concurrent</th>
-				</tr>
-			</thead>
-			<tbody>
-			<?php foreach ( $recent as $entry ) : ?>
-				<tr>
-					<td><?php echo esc_html( gmdate( 'H:i:s', (int) $entry['ts'] ) ); ?></td>
-					<td><?php echo esc_html( $entry['scenario'] ); ?></td>
-					<td><?php echo esc_html( $entry['ms'] ); ?></td>
-					<td><?php echo esc_html( $entry['total_ms'] ); ?></td>
-					<td><?php echo esc_html( $entry['cpu_ms'] ); ?></td>
-					<td><?php echo esc_html( $entry['total_cpu_ms'] ); ?></td>
-					<td><?php echo esc_html( $entry['db_queries'] ); ?></td>
-					<td><?php echo esc_html( $entry['db_time_ms'] ); ?></td>
-					<td><?php echo esc_html( round( (int) $entry['peak_memory'] / 1048576, 1 ) ); ?></td>
-					<td><?php echo esc_html( round( (int) $entry['memory_delta'] / 1024, 1 ) ); ?></td>
-					<td><?php echo esc_html( $entry['status'] ); ?></td>
-					<td><?php echo esc_html( $entry['updates_in'] ); ?></td>
-					<td><?php echo esc_html( $entry['updates_out'] ); ?></td>
-					<td><?php echo esc_html( $entry['response_bytes'] ); ?></td>
-					<td><?php echo esc_html( $entry['awareness_count'] ); ?></td>
-					<td><?php echo esc_html( $entry['total_updates'] ); ?></td>
-					<td><?php echo empty( $entry['should_compact'] ) ? '' : 'yes'; ?></td>
-					<td><?php echo esc_html( $entry['concurrent'] ); ?></td>
-				</tr>
-			<?php endforeach; ?>
-			</tbody>
-		</table>
-	</div>
-	<?php
 }
 
 // =============================================================================
