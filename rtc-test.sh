@@ -69,26 +69,23 @@ if [ -f "${_env_file}" ]; then
 	_pre_post="${POST_ID:-}"
 	_pre_approach="${APPROACH:-}"
 	_pre_reporter_url="${REPORTER_URL:-}"
-	_pre_reporter_user="${REPORTER_USER:-}"
-	_pre_reporter_pass="${REPORTER_PASS:-}"
+	_pre_api_key="${DOTORG_REPORT_API_KEY:-}"
 	_pre_env_name="${ENVIRONMENT_NAME:-}"
 	# shellcheck source=/dev/null
 	. "${_env_file}"
-	[ -n "${_pre_url}"           ] && WP_URL="${_pre_url}"
-	[ -n "${_pre_user}"          ] && WP_USER="${_pre_user}"
-	[ -n "${_pre_pass}"          ] && WP_PASS="${_pre_pass}"
-	[ -n "${_pre_jar}"           ] && WP_COOKIE_JAR="${_pre_jar}"
-	[ -n "${_pre_nonce}"         ] && WP_NONCE="${_pre_nonce}"
-	[ -n "${_pre_path}"          ] && WP_PATH="${_pre_path}"
-	[ -n "${_pre_post}"          ] && POST_ID="${_pre_post}"
-	[ -n "${_pre_approach}"      ] && APPROACH="${_pre_approach}"
-	[ -n "${_pre_reporter_url}"  ] && REPORTER_URL="${_pre_reporter_url}"
-	[ -n "${_pre_reporter_user}" ] && REPORTER_USER="${_pre_reporter_user}"
-	[ -n "${_pre_reporter_pass}" ] && REPORTER_PASS="${_pre_reporter_pass}"
-	[ -n "${_pre_env_name}"      ] && ENVIRONMENT_NAME="${_pre_env_name}"
+	[ -n "${_pre_url}"          ] && WP_URL="${_pre_url}"
+	[ -n "${_pre_user}"         ] && WP_USER="${_pre_user}"
+	[ -n "${_pre_pass}"         ] && WP_PASS="${_pre_pass}"
+	[ -n "${_pre_jar}"          ] && WP_COOKIE_JAR="${_pre_jar}"
+	[ -n "${_pre_nonce}"        ] && WP_NONCE="${_pre_nonce}"
+	[ -n "${_pre_path}"         ] && WP_PATH="${_pre_path}"
+	[ -n "${_pre_post}"         ] && POST_ID="${_pre_post}"
+	[ -n "${_pre_approach}"     ] && APPROACH="${_pre_approach}"
+	[ -n "${_pre_reporter_url}" ] && REPORTER_URL="${_pre_reporter_url}"
+	[ -n "${_pre_api_key}"      ] && DOTORG_REPORT_API_KEY="${_pre_api_key}"
+	[ -n "${_pre_env_name}"     ] && ENVIRONMENT_NAME="${_pre_env_name}"
 	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post \
-	      _pre_approach _pre_reporter_url _pre_reporter_user _pre_reporter_pass \
-	      _pre_env_name
+	      _pre_approach _pre_reporter_url _pre_api_key _pre_env_name
 fi
 unset _env_file
 
@@ -1817,10 +1814,9 @@ cmd_submit_results() {
 	require_auth
 
 	local reporter_url="${REPORTER_URL:-}"
-	local reporter_user="${REPORTER_USER:-}"
-	local reporter_pass="${REPORTER_PASS:-}"
-	if [ -z "${reporter_url}" ] || [ -z "${reporter_user}" ] || [ -z "${reporter_pass}" ]; then
-		printf 'REPORTER_URL, REPORTER_USER, and REPORTER_PASS must be set to submit results.\n'
+	local api_key="${DOTORG_REPORT_API_KEY:-}"
+	if [ -z "${reporter_url}" ] || [ -z "${api_key}" ]; then
+		printf 'REPORTER_URL and DOTORG_REPORT_API_KEY must be set to submit results.\n'
 		printf 'Skipping submission.\n'
 		return 0
 	fi
@@ -1834,8 +1830,8 @@ cmd_submit_results() {
 		-X POST "${PLUGIN_SUBMIT_URL}" \
 		-H "Content-Type: application/json" \
 		-w '\n__HTTP_STATUS__:%{http_code}' \
-		-d "$(printf '{"reporter_url":"%s","reporter_user":"%s","reporter_pass":"%s","environment_name":"%s"}' \
-			"${reporter_url}" "${reporter_user}" "${reporter_pass}" "${environment_name}")" \
+		-d "$(printf '{"reporter_url":"%s","api_key":"%s","environment_name":"%s"}' \
+			"${reporter_url}" "${api_key}" "${environment_name}")" \
 		2>/dev/null) || { printf 'ERROR: curl request failed.\n'; return 1; }
 
 	http_code=$(printf '%s' "${response}" | grep '__HTTP_STATUS__' | grep -o '[0-9]*$')

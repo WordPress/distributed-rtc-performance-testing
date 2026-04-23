@@ -430,14 +430,11 @@ function rtctest_register_routes() {
 					'type'              => 'string',
 					'sanitize_callback' => 'esc_url_raw',
 				),
-				'reporter_user'    => array(
+				'api_key'          => array(
 					'required'          => true,
 					'type'              => 'string',
+					'description'       => 'Reporter credentials in username:password format (DOTORG_REPORT_API_KEY).',
 					'sanitize_callback' => 'sanitize_text_field',
-				),
-				'reporter_pass'    => array(
-					'required' => true,
-					'type'     => 'string',
 				),
 				'environment_name' => array(
 					'required'          => false,
@@ -524,8 +521,7 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 	global $wpdb;
 
 	$reporter_url     = $request->get_param( 'reporter_url' );
-	$reporter_user    = $request->get_param( 'reporter_user' );
-	$reporter_pass    = $request->get_param( 'reporter_pass' );
+	$api_key          = $request->get_param( 'api_key' );    // username:password format
 	$environment_name = $request->get_param( 'environment_name' ) ?: get_option( 'siteurl' );
 
 	// Build environment snapshot.
@@ -607,7 +603,7 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 		array(
 			'headers' => array(
 				'Content-Type'  => 'application/json',
-				'Authorization' => 'Basic ' . base64_encode( $reporter_user . ':' . $reporter_pass ),
+				'Authorization' => 'Basic ' . base64_encode( $api_key ),
 			),
 			'body'    => wp_json_encode( array(
 				'environment_name' => $environment_name,
