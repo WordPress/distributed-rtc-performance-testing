@@ -804,6 +804,13 @@ setup_wpcli() {
 		printf 'RTC:            could not update option -- verify in Settings > Writing\n'
 	fi
 
+	# Enable SAVEQUERIES so the plugin can record per-request DB time.
+	if wp "${WP_FLAGS[@]}" config set SAVEQUERIES true --raw >/dev/null 2>&1; then
+		printf 'SAVEQUERIES:    enabled in wp-config.php\n'
+	else
+		die "Could not set SAVEQUERIES in wp-config.php. Ensure the file is writable and re-run setup."
+	fi
+
 	# Write generated values to .env (or .env.example if .env does not exist yet).
 	# Strip any previous generated section first (from the marker line to EOF),
 	# then append the fresh block.
