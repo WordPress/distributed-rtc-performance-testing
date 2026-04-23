@@ -811,6 +811,24 @@ setup_wpcli() {
 		die "Could not set SAVEQUERIES in wp-config.php. Ensure the file is writable and re-run setup."
 	fi
 
+	# Gutenberg must not be active during tests — it ships its own RTC implementation
+	# that would interfere with the approaches under test.
+	if wp "${WP_FLAGS[@]}" plugin is-installed gutenberg >/dev/null 2>&1; then
+		printf 'Gutenberg:      installed\n'
+		if wp "${WP_FLAGS[@]}" plugin is-active gutenberg >/dev/null 2>&1; then
+			printf 'Gutenberg:      active -- deactivating...\n'
+			if wp "${WP_FLAGS[@]}" plugin deactivate gutenberg >/dev/null 2>&1; then
+				printf 'Gutenberg:      deactivated\n'
+			else
+				die "Could not deactivate Gutenberg. Deactivate it manually and re-run setup."
+			fi
+		else
+			printf 'Gutenberg:      not active\n'
+		fi
+	else
+		printf 'Gutenberg:      not installed\n'
+	fi
+
 	# Write generated values to .env (or .env.example if .env does not exist yet).
 	# Strip any previous generated section first (from the marker line to EOF),
 	# then append the fresh block.
@@ -1545,12 +1563,10 @@ print_env() {
 	printf '%s' "${env}" | tr ',' '\n' | awk '
 	{
 		gsub(/[{}"]/, "")
-		if (match($0, /php_version:/))           printf "  %-22s %s\n", "PHP:",              substr($0, RSTART+12)
-		if (match($0, /wp_version:/))            printf "  %-22s %s\n", "WordPress:",        substr($0, RSTART+11)
-		if (match($0, /db_version:/))            printf "  %-22s %s\n", "Database:",         substr($0, RSTART+11)
-		if (match($0, /gutenberg_version:/))     printf "  %-22s %s\n", "Gutenberg:",        substr($0, RSTART+18)
-		if (match($0, /gutenberg_active:/))      printf "  %-22s %s\n", "Gutenberg active:", substr($0, RSTART+17)
-		if (match($0, /object_cache_type:/))     printf "  %-22s %s\n", "Object cache:",     substr($0, RSTART+18)
+		if (match($0, /php_version:/))           printf "  %-22s %s\n", "PHP:",          substr($0, RSTART+12)
+		if (match($0, /wp_version:/))            printf "  %-22s %s\n", "WordPress:",    substr($0, RSTART+11)
+		if (match($0, /db_version:/))            printf "  %-22s %s\n", "Database:",     substr($0, RSTART+11)
+		if (match($0, /object_cache_type:/))     printf "  %-22s %s\n", "Object cache:", substr($0, RSTART+18)
 		if (match($0, /savequeries:/))           printf "  %-22s %s\n", "SAVEQUERIES:",      substr($0, RSTART+12)
 		if (match($0, /compaction_threshold:/))  printf "  %-22s %s updates\n", "Compact at:", substr($0, RSTART+21)
 		if (match($0, /awareness_timeout_s:/))   printf "  %-22s %s s\n", "Awareness TTL:",  substr($0, RSTART+20)

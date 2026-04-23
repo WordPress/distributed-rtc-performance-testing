@@ -725,15 +725,6 @@ function rtctest_detect_object_cache_type() {
 function rtctest_get_env() {
 	global $wpdb;
 
-	if ( ! function_exists( 'get_plugins' ) ) {
-		require_once ABSPATH . 'wp-admin/includes/plugin.php';
-	}
-	$gutenberg_file    = 'gutenberg/gutenberg.php';
-	$all_plugins       = get_plugins();
-	$gutenberg_data    = $all_plugins[ $gutenberg_file ] ?? null;
-	$gutenberg_version = $gutenberg_data ? $gutenberg_data['Version'] : 'not-found';
-	$gutenberg_active  = is_plugin_active( $gutenberg_file );
-
 	$compaction_threshold = class_exists( 'WP_HTTP_Polling_Sync_Server' )
 		? WP_HTTP_Polling_Sync_Server::COMPACTION_THRESHOLD
 		: null;
@@ -745,8 +736,6 @@ function rtctest_get_env() {
 		'php_version'          => PHP_VERSION,
 		'wp_version'           => get_bloginfo( 'version' ),
 		'db_version'           => $wpdb->db_version(),
-		'gutenberg_version'    => $gutenberg_version,
-		'gutenberg_active'     => $gutenberg_active,
 		'ext_object_cache'     => wp_using_ext_object_cache(),
 		'object_cache_type'    => rtctest_detect_object_cache_type(),
 		'savequeries'          => defined( 'SAVEQUERIES' ) && SAVEQUERIES,
