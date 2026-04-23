@@ -17,13 +17,47 @@ Requirements: **bash**, **curl**. WP-CLI is used by `setup`/`teardown` if availa
 
 ## Host instructions
 
-If you are hosting a test WordPress site for this work, here is what we need and how to do it.
+If you are a hosting provider looking to run these tests to submit data back to the Core team, here are the steps you should follow:
 
-1. **Prepare the files** — Get `rtc-test.php` and `rtc-test.sh` from this repo (see the table above for where each file belongs).
-2. **Install the MU-plugin** — Copy `rtc-test.php` into `wp-content/mu-plugins/` on the site you are testing.
-3. **Run setup on the server** — From the directory where `rtc-test.sh` lives, run `bash rtc-test.sh setup` (ideally on the web host so WP-CLI can create the test user and post). Confirm the plugin is loaded under **Tools → RTC Tests** in wp-admin.
-4. **Run the measurement pass** — Run the baseline sequence (e.g. `baseline`, `single-idle`, `sustain`, then `report` as described under [Initial report](#initial-report)). Adjust variants if you are asked to stress-test.
-5. **Share the output** — Send back the command output, reports, and any notes on environment (PHP version, caching, approximate traffic).
+The following tools are **required** to run this test script:
+- cURL
+- WP-CLI
+- patch
+- openssl (optional)
+
+### Clone the repository
+
+This repository can be cloned anywhere on a server.
+
+```bash
+git clone https://github.com/WordPress/distributed-rtc-performance-testing.git <path>
+```
+
+### Configure the test runner.
+
+While the test runner supports a number of environment variables that adjust how the tests are run, there are a few that must be configured.
+
+- `WP_PATH`: This must be set to the absolute path of root directory for the test WordPress installation.
+- `REPORTER_URL`: The URL to report results to. In most cases, this should be the default of https://make.wordpress.org/hosting. But it can be the URL of any site running the [PHPUnit Test Reporter plugin](https://github.com/wordPress/phpunit-test-reporter).
+- `DOTORG_REPORT_API_KEY`: The credentials of a reporting user on the `REPORTER_URL` site in the format of `username:application-password`.
+
+Run the following command to create an `.env` file from the example:
+
+```bash
+cp .env.example .env
+```
+
+You can then edit the `.env` file using the editor of your choice to adjust the configuration.
+
+**Note:** The test runner will erase the contents of the configured site. Do not configure the test runner to use a production site, or any site that cannot be wiped clean. 
+
+### Run the Tests
+
+```bash
+bash run.sh
+```
+
+This will set up the environment,run the tests, and attempT to submit the results back to the site configured in the `REPORTER_URL`. 
 
 ---
 
