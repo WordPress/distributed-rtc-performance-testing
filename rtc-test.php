@@ -469,10 +469,6 @@ function rtctest_get_env() {
 	$awareness_timeout_s = class_exists( 'WP_HTTP_Polling_Sync_Server' )
 		? WP_HTTP_Polling_Sync_Server::AWARENESS_TIMEOUT
 		: null;
-	$storage_backend   = class_exists( 'WP_Sync_Post_Meta_Storage' ) ? 'post_meta' : 'unknown';
-	$storage_post_type = class_exists( 'WP_Sync_Post_Meta_Storage' )
-		? WP_Sync_Post_Meta_Storage::POST_TYPE
-		: null;
 
 	$env = array(
 		'php_version'          => PHP_VERSION,
@@ -485,8 +481,6 @@ function rtctest_get_env() {
 		'savequeries'          => defined( 'SAVEQUERIES' ) && SAVEQUERIES,
 		'compaction_threshold' => $compaction_threshold,
 		'awareness_timeout_s'  => $awareness_timeout_s,
-		'storage_backend'      => $storage_backend,
-		'storage_post_type'    => $storage_post_type,
 		'captured_at'          => time(),
 	);
 
