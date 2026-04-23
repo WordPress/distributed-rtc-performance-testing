@@ -421,6 +421,39 @@ function rtctest_register_routes() {
 	);
 }
 
+function rtctest_detect_object_cache_type() {
+	global $wp_object_cache;
+
+	if ( ! wp_using_ext_object_cache() ) {
+		return 'default'; // WP's built-in non-persistent in-memory cache.
+	}
+
+	// Popular Redis drop-ins set one of these constants.
+	if ( defined( 'WP_REDIS_VERSION' ) ) {
+		return 'redis'; // Redis Object Cache plugin (Till Krüss).
+	}
+	if ( defined( 'WP_REDIS_OBJECT_CACHE' ) ) {
+		return 'redis'; // WP Redis (Pantheon / Human Made).
+	}
+
+	// Memcached drop-in (bundled with WordPress.com / Automattic).
+	if ( defined( 'WP_CACHE_KEY_SALT' ) && class_exists( 'Memcached' ) ) {
+		return 'memcached';
+	}
+	if ( class_exists( 'Memcache' ) ) {
+		return 'memcache';
+	}
+
+	// Fall back to the actual class name — captures everything else.
+	// Note: some drop-ins reuse the class name WP_Object_Cache even for
+	// Redis/Memcached backends, which is why the constant checks come first.
+	if ( isset( $wp_object_cache ) && is_object( $wp_object_cache ) ) {
+		return 'ext:' . get_class( $wp_object_cache );
+	}
+
+	return 'ext:unknown';
+}
+
 function rtctest_get_env() {
 	global $wpdb;
 
@@ -451,6 +484,7 @@ function rtctest_get_env() {
 		'gutenberg_version'    => $gutenberg_version,
 		'gutenberg_active'     => $gutenberg_active,
 		'ext_object_cache'     => wp_using_ext_object_cache(),
+		'object_cache_type'    => rtctest_detect_object_cache_type(),
 		'savequeries'          => defined( 'SAVEQUERIES' ) && SAVEQUERIES,
 		'compaction_threshold' => $compaction_threshold,
 		'awareness_timeout_s'  => $awareness_timeout_s,
