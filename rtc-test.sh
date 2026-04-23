@@ -804,8 +804,11 @@ setup_wpcli() {
 		printf 'RTC:            could not update option -- verify in Settings > Writing\n'
 	fi
 
+	# Check if SAVEQUERIES is already defined and enabled in wp-config.php.
+	if wp "${WP_FLAGS[@]}" config get SAVEQUERIES >/dev/null 2>&1; then
+		printf 'SAVEQUERIES:    already enabled in wp-config.php\n'
 	# Enable SAVEQUERIES so the plugin can record per-request DB time.
-	if wp "${WP_FLAGS[@]}" config set SAVEQUERIES true --raw >/dev/null 2>&1; then
+	elif wp "${WP_FLAGS[@]}" config set SAVEQUERIES true --raw >/dev/null 2>&1; then
 		printf 'SAVEQUERIES:    enabled in wp-config.php\n'
 	else
 		die "Could not set SAVEQUERIES in wp-config.php. Ensure the file is writable and re-run setup."
