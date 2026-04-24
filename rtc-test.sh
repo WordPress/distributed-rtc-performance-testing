@@ -99,7 +99,7 @@ WP_PASS="${WP_PASS:-}"                                            # WP login pas
 WP_COOKIE_JAR="${WP_COOKIE_JAR:-${SCRIPT_DIR}/rtc-test-cookies.txt}"  # cookie jar path (set by setup)
 WP_NONCE="${WP_NONCE:-}"                                          # wp_rest nonce (set by setup, ~12h TTL)
 WP_PATH="${WP_PATH:-}"       # Absolute path to WordPress root; required by setup
-REQUIRED_WP_VERSION="${REQUIRED_WP_VERSION:-nightly}"   # WordPress version required by these tests
+REQUIRED_WP_VERSION="${REQUIRED_WP_VERSION:-7.0-RC2}"   # WordPress version required by these tests
 POST_ID="${POST_ID:-1}"
 POLLS="${POLLS:-10}"
 POLL_DELAY="${POLL_DELAY:-1}"   # Seconds between polls per client (0 = immediate re-poll / stress mode)
@@ -540,12 +540,12 @@ cmd_apply_approach() {
 	local WP_FLAGS=()
 	_build_wp_flags
 
-	# Step 1: Reset to a clean nightly build so every approach starts from identical files.
-	printf 'Downloading WordPress nightly...\n'
-	wp "${WP_FLAGS[@]}" core download --force --version=nightly --skip-content \
-		|| die "Failed to download WordPress nightly."
+	# Step 1: Reset to a clean build so every approach starts from identical files.
+	printf 'Downloading WordPress %s...\n' "${REQUIRED_WP_VERSION}"
+	wp "${WP_FLAGS[@]}" core download --force --version="${REQUIRED_WP_VERSION}" --skip-content \
+		|| die "Failed to download WordPress ${REQUIRED_WP_VERSION}."
 
-	# Step 2: Re-copy the MU-plugin (nightly download does not touch wp-content, but
+	# Step 2: Re-copy the MU-plugin (core download does not touch wp-content, but
 	# re-copying ensures the plugin version matches this repo).
 	local mu_dir="${WP_PATH}/wp-content/mu-plugins"
 	mkdir -p "${mu_dir}"
@@ -553,17 +553,17 @@ cmd_apply_approach() {
 		&& printf 'MU-plugin:      re-copied\n' \
 		|| printf 'WARNING: Could not re-copy MU-plugin.\n'
 
-	# Step 3: Baseline DB upgrade (nightly may carry a newer schema than what is in the DB).
+	# Step 3: Baseline DB upgrade in case the download carries a newer schema than the DB.
 	wp "${WP_FLAGS[@]}" core update-db >/dev/null 2>&1 || true
 
-	# Step 4: Apply the approach's patch (post-meta is the nightly baseline, no patch needed).
+	# Step 4: Apply the approach's patch (post-meta is the baseline, no patch needed).
 	local new_patch
 	new_patch="$(approach_patch_file "${approach}")"
 	if [ -n "${new_patch}" ]; then
 		[ -f "${new_patch}" ] || die "Patch file not found: ${new_patch}"
 
 		# Remove any files that this patch would create fresh.  wp core download
-		# does not delete files that are absent from the nightly package, so files
+		# does not delete files that are absent from the downloaded package, so files
 		# added by a previous approach's patch would still be on disk and cause
 		# patch to detect an "already exists" conflict.
 		# New-file hunks have "--- /dev/null" as their source; the destination line
@@ -585,14 +585,14 @@ cmd_apply_approach() {
 		local _fwd_dry
 		if ! _fwd_dry=$(patch --dry-run --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" 2>&1); then
 			printf '%s\n' "${_fwd_dry}"
-			die "Patch dry-run failed. The patch context does not match the nightly files.
+			die "Patch dry-run failed. The patch context does not match the WordPress files.
   Check which file/hunk is listed above."
 		fi
 		patch --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" \
 			|| die "Patch failed. WordPress files may be in an inconsistent state."
 		printf 'Patch applied.\n'
 	else
-		printf 'Approach %s is the nightly baseline — no patch needed.\n' "${approach}"
+		printf 'Approach %s is the baseline — no patch needed.\n' "${approach}"
 	fi
 
 	# Step 5: Run DB upgrade again if the approach introduces a schema change (adds the
@@ -634,9 +634,9 @@ cmd_reset_approach() {
 	local WP_FLAGS=()
 	_build_wp_flags
 
-	printf 'Downloading WordPress nightly...\n'
-	wp "${WP_FLAGS[@]}" core download --force --version=nightly --skip-content \
-		|| die "Failed to download WordPress nightly."
+	printf 'Downloading WordPress %s...\n' "${REQUIRED_WP_VERSION}"
+	wp "${WP_FLAGS[@]}" core download --force --version="${REQUIRED_WP_VERSION}" --skip-content \
+		|| die "Failed to download WordPress ${REQUIRED_WP_VERSION}."
 
 	# Remove any files added by approach patches — wp core download leaves them behind.
 	local _patch_file _del_count=0 _rel _target
@@ -665,7 +665,7 @@ cmd_reset_approach() {
 	wp "${WP_FLAGS[@]}" cache flush 2>/dev/null || true
 	wp "${WP_FLAGS[@]}" option update wp_collaboration_enabled 1 >/dev/null 2>&1 || true
 
-	printf '\nReset to clean nightly.\n'
+	printf '\nReset to clean %s.\n' "${REQUIRED_WP_VERSION}"
 }
 
 # -------------------------------------------------------------------------
@@ -2051,8 +2051,8 @@ case "${COMMAND}" in
 		printf 'Commands:\n'
 		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
 		printf '  ensure-wp-version     Verify WordPress %s is installed; update via WP-CLI if not\n' "${REQUIRED_WP_VERSION}"
-		printf '  apply-approach <name> Download nightly, apply approach patch, clear RTC data\n'
-		printf '  reset-approach        Download nightly and return to a clean unpatched state\n'
+		printf '  apply-approach <name> Download WordPress, apply approach patch, clear RTC data\n'
+		printf '  reset-approach        Download WordPress and return to a clean unpatched state\n'
 		printf '  teardown              Delete test post, remove cookie jar, strip generated .env section\n'
 		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
 		printf '  baseline              Measure ambient WP REST overhead (run first)\n'
