@@ -567,7 +567,7 @@ cmd_apply_approach() {
 		# added by a previous approach's patch would still be on disk and cause
 		# patch to detect an "already exists" conflict.
 		# New-file hunks have "--- /dev/null" as their source; the destination line
-		# is "+++ b/src/<path>" which, with -p2, maps to <path> under WP_PATH.
+		# is "+++ b/<path>" which, with -p1, maps to <path> under WP_PATH.
 		local _del_count=0
 		while IFS= read -r _rel; do
 			local _target="${WP_PATH}/${_rel}"
@@ -576,19 +576,19 @@ cmd_apply_approach() {
 				_del_count=$(( _del_count + 1 ))
 			fi
 		done < <(grep -A1 '^--- /dev/null' "${new_patch}" \
-		         | grep '^\+\+\+ ' \
-		         | sed 's|^\+\+\+ b/src/||')
+		         | grep '^+++ ' \
+		         | sed 's|^+++ b/||')
 		[ "${_del_count}" -gt 0 ] && \
 			printf 'Removed %d file(s) added by a previous patch.\n' "${_del_count}"
 
 		printf 'Applying patch for %s...\n' "${approach}"
 		local _fwd_dry
-		if ! _fwd_dry=$(patch --dry-run --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" 2>&1); then
+		if ! _fwd_dry=$(patch --dry-run --batch -p1 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" 2>&1); then
 			printf '%s\n' "${_fwd_dry}"
 			die "Patch dry-run failed. The patch context does not match the WordPress files.
   Check which file/hunk is listed above."
 		fi
-		patch --batch -p2 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" \
+		patch --batch -p1 --ignore-whitespace -d "${WP_PATH}" < "${new_patch}" \
 			|| die "Patch failed. WordPress files may be in an inconsistent state."
 		printf 'Patch applied.\n'
 	else
@@ -649,8 +649,8 @@ cmd_reset_approach() {
 				_del_count=$(( _del_count + 1 ))
 			fi
 		done < <(grep -A1 '^--- /dev/null' "${_patch_file}" \
-		         | grep '^\+\+\+ ' \
-		         | sed 's|^\+\+\+ b/src/||')
+		         | grep '^+++ ' \
+		         | sed 's|^+++ b/||')
 	done
 	[ "${_del_count}" -gt 0 ] && \
 		printf 'Removed %d file(s) added by approach patches.\n' "${_del_count}"
