@@ -1682,10 +1682,10 @@ index 4b6d9de25f..17c1695e6d 100644
  // Navigation menu actions.
  add_action( 'delete_post', '_wp_delete_post_menu_item' );
 diff --git a/wp-includes/post.php b/wp-includes/post.php
-index 215fa153f7..a51bf46e28 100644
+index 88deb1090f..a51bf46e28 100644
 --- a/wp-includes/post.php
 +++ b/wp-includes/post.php
-@@ -657,42 +657,6 @@ function create_initial_post_types() {
+@@ -657,41 +657,6 @@ function create_initial_post_types() {
  		)
  	);
  
@@ -1719,7 +1719,6 @@ index 215fa153f7..a51bf46e28 100644
 -				'show_in_menu'       => false,
 -				'show_in_rest'       => false,
 -				'show_ui'            => false,
--				'can_export'         => false,
 -				'supports'           => array( 'custom-fields' ),
 -			)
 -		);
@@ -1746,15 +1745,15 @@ index c524f9e22a..688b236556 100644
  }
  
 diff --git a/wp-includes/version.php b/wp-includes/version.php
-index 79f3d74a37..bf97d05440 100644
+index df7cfc1326..1184144b41 100644
 --- a/wp-includes/version.php
 +++ b/wp-includes/version.php
 @@ -16,14 +16,14 @@
   *
   * @global string $wp_version
   */
--$wp_version = '7.0-RC2-62242';
-+$wp_version = '7.0-RC2-20260424.010121';
+-$wp_version = '7.0-RC2-62158';
++$wp_version = '7.0-RC2-20260424.015353';
  
  /**
   * Holds the WordPress DB revision, increments when changes are made to the WordPress DB schema.

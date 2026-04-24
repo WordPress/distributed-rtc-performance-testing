@@ -376,10 +376,18 @@ index c657c6c2e7..a32e19f0cf 100644
  	if ( empty( $args['auth_callback'] ) ) {
  		if ( is_protected_meta( $meta_key, $object_type ) ) {
 diff --git a/wp-includes/post.php b/wp-includes/post.php
-index 215fa153f7..9af3193e71 100644
+index 88deb1090f..9af3193e71 100644
 --- a/wp-includes/post.php
 +++ b/wp-includes/post.php
-@@ -8445,6 +8445,51 @@ function wp_add_trashed_suffix_to_post_name_for_post( $post ) {
+@@ -687,6 +687,7 @@ function create_initial_post_types() {
+ 				'show_in_menu'       => false,
+ 				'show_in_rest'       => false,
+ 				'show_ui'            => false,
++				'can_export'         => false,
+ 				'supports'           => array( 'custom-fields' ),
+ 			)
+ 		);
+@@ -8444,6 +8445,51 @@ function wp_add_trashed_suffix_to_post_name_for_post( $post ) {
   */
  function wp_cache_set_posts_last_changed() {
  	wp_cache_set_last_changed( 'posts' );
@@ -431,7 +439,7 @@ index 215fa153f7..9af3193e71 100644
  }
  
  /**
-@@ -8652,7 +8697,9 @@ function use_block_editor_for_post_type( $post_type ) {
+@@ -8651,7 +8697,9 @@ function use_block_editor_for_post_type( $post_type ) {
   * Registers any additional post meta fields.
   *
   * @since 6.3.0 Adds `wp_pattern_sync_status` meta field to the wp_block post type so an unsynced option can be added.
@@ -442,7 +450,7 @@ index 215fa153f7..9af3193e71 100644
   *
   * @link https://github.com/WordPress/gutenberg/pull/51144
   */
-@@ -8673,6 +8720,15 @@ function wp_create_initial_post_meta() {
+@@ -8672,6 +8720,15 @@ function wp_create_initial_post_meta() {
  		)
  	);
  
@@ -458,7 +466,7 @@ index 215fa153f7..9af3193e71 100644
  	if ( wp_is_collaboration_enabled() ) {
  		register_meta(
  			'post',
-@@ -8697,5 +8753,14 @@ function wp_create_initial_post_meta() {
+@@ -8696,5 +8753,14 @@ function wp_create_initial_post_meta() {
  				'type'              => 'string',
  			)
  		);
@@ -474,15 +482,15 @@ index 215fa153f7..9af3193e71 100644
  	}
  }
 diff --git a/wp-includes/version.php b/wp-includes/version.php
-index 79f3d74a37..cdd60ea5a5 100644
+index df7cfc1326..f1b0bcad30 100644
 --- a/wp-includes/version.php
 +++ b/wp-includes/version.php
 @@ -16,7 +16,7 @@
   *
   * @global string $wp_version
   */
--$wp_version = '7.0-RC2-62242';
-+$wp_version = '7.0-RC2-20260424.010944';
+-$wp_version = '7.0-RC2-62158';
++$wp_version = '7.0-RC2-20260424.015950';
  
  /**
   * Holds the WordPress DB revision, increments when changes are made to the WordPress DB schema.
