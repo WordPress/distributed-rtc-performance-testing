@@ -1,8 +1,8 @@
-diff --git a/src/wp-admin/admin.php b/src/wp-admin/admin.php
-index 82ab6b93ac99e..3634c8c29c20d 100644
---- a/src/wp-admin/admin.php
-+++ b/src/wp-admin/admin.php
-@@ -113,6 +113,14 @@
+diff --git a/wp-admin/admin.php b/wp-admin/admin.php
+index 82ab6b93ac..3634c8c29c 100644
+--- a/wp-admin/admin.php
++++ b/wp-admin/admin.php
+@@ -113,6 +113,14 @@ if ( ! wp_next_scheduled( 'delete_expired_transients' ) && ! wp_installing() ) {
  	wp_schedule_event( time(), 'daily', 'delete_expired_transients' );
  }
  
@@ -17,11 +17,11 @@ index 82ab6b93ac99e..3634c8c29c20d 100644
  set_screen_options();
  
  $date_format = __( 'F j, Y' );
-diff --git a/src/wp-admin/includes/schema.php b/src/wp-admin/includes/schema.php
-index 340bdebac71eb..1c7b40b71c498 100644
---- a/src/wp-admin/includes/schema.php
-+++ b/src/wp-admin/includes/schema.php
-@@ -186,6 +186,20 @@ function wp_get_db_schema( $scope = 'all', $blog_id = null ) {
+diff --git a/wp-admin/includes/schema.php b/wp-admin/includes/schema.php
+index 340bdebac7..1c7b40b71c 100644
+--- a/wp-admin/includes/schema.php
++++ b/wp-admin/includes/schema.php
+@@ -186,6 +186,20 @@ CREATE TABLE $wpdb->posts (
  	KEY post_parent (post_parent),
  	KEY post_author (post_author),
  	KEY type_status_author (post_type,post_status,post_author)
@@ -42,10 +42,10 @@ index 340bdebac71eb..1c7b40b71c498 100644
  ) $charset_collate;\n";
  
  	// Single site users table. The multisite flavor of the users table is handled below.
-diff --git a/src/wp-admin/includes/upgrade.php b/src/wp-admin/includes/upgrade.php
-index 914113bde00d0..dde5b44f0abbf 100644
---- a/src/wp-admin/includes/upgrade.php
-+++ b/src/wp-admin/includes/upgrade.php
+diff --git a/wp-admin/includes/upgrade.php b/wp-admin/includes/upgrade.php
+index 6adb0521ff..a601be26bc 100644
+--- a/wp-admin/includes/upgrade.php
++++ b/wp-admin/includes/upgrade.php
 @@ -886,7 +886,7 @@ function upgrade_all() {
  		upgrade_682();
  	}
@@ -55,10 +55,10 @@ index 914113bde00d0..dde5b44f0abbf 100644
  		upgrade_700();
  	}
  
-diff --git a/src/wp-includes/class-wpdb.php b/src/wp-includes/class-wpdb.php
-index e5300e6d75122..f22ac010cc975 100644
---- a/src/wp-includes/class-wpdb.php
-+++ b/src/wp-includes/class-wpdb.php
+diff --git a/wp-includes/class-wpdb.php b/wp-includes/class-wpdb.php
+index 23c865b87d..f4da31dc57 100644
+--- a/wp-includes/class-wpdb.php
++++ b/wp-includes/class-wpdb.php
 @@ -299,6 +299,7 @@ class wpdb {
  		'term_relationships',
  		'termmeta',
@@ -83,10 +83,10 @@ index e5300e6d75122..f22ac010cc975 100644
  	/**
  	 * WordPress Terms table.
  	 *
-diff --git a/src/wp-includes/collaboration.php b/src/wp-includes/collaboration.php
-index 11698a2ac78f4..350b6cf1b21b0 100644
---- a/src/wp-includes/collaboration.php
-+++ b/src/wp-includes/collaboration.php
+diff --git a/wp-includes/collaboration.php b/wp-includes/collaboration.php
+index 11698a2ac7..350b6cf1b2 100644
+--- a/wp-includes/collaboration.php
++++ b/wp-includes/collaboration.php
 @@ -11,7 +11,8 @@
   *
   * If the WP_ALLOW_COLLABORATION constant is false,
@@ -158,11 +158,11 @@ index 11698a2ac78f4..350b6cf1b21b0 100644
 +		)
 +	);
 +}
-diff --git a/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
+diff --git a/wp-includes/collaboration/class-wp-collaboration-table-storage.php b/wp-includes/collaboration/class-wp-collaboration-table-storage.php
 new file mode 100644
-index 0000000000000..2781af4716bf4
+index 0000000000..2781af4716
 --- /dev/null
-+++ b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
++++ b/wp-includes/collaboration/class-wp-collaboration-table-storage.php
 @@ -0,0 +1,392 @@
 +<?php
 +/**
@@ -556,13 +556,13 @@ index 0000000000000..2781af4716bf4
 +		return true;
 +	}
 +}
-diff --git a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
-similarity index 54%
-rename from src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-rename to src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
-index a90821ab78d3e..b3a7907cb021c 100644
---- a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-+++ b/src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
+diff --git a/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
+similarity index 53%
+rename from wp-includes/collaboration/class-wp-http-polling-sync-server.php
+rename to wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
+index 88554a48c7..b3a7907cb0 100644
+--- a/wp-includes/collaboration/class-wp-http-polling-sync-server.php
++++ b/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
 @@ -1,8 +1,9 @@
  <?php
  /**
@@ -591,34 +591,40 @@ index a90821ab78d3e..b3a7907cb021c 100644
  
  	/**
  	 * Awareness timeout in seconds. Clients that haven't updated
-@@ -38,7 +39,7 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -38,7 +39,31 @@ class WP_HTTP_Polling_Sync_Server {
  	const COMPACTION_THRESHOLD = 50;
  
  	/**
--	 * Maximum total size (in bytes) of the request body.
-+	 * Maximum allowed request body size in bytes.
- 	 *
- 	 * @since 7.0.0
- 	 * @var int
-@@ -54,7 +55,7 @@ class WP_HTTP_Polling_Sync_Server {
- 	const MAX_ROOMS_PER_REQUEST = 50;
- 
- 	/**
--	 * Maximum length of a single update data string.
-+	 * Maximum allowed size for a single update's data field in bytes.
- 	 *
- 	 * @since 7.0.0
- 	 * @var int
-@@ -62,7 +63,7 @@ class WP_HTTP_Polling_Sync_Server {
- 	const MAX_UPDATE_DATA_SIZE = MB_IN_BYTES;
- 
- 	/**
 -	 * Sync update type: compaction.
++	 * Maximum allowed request body size in bytes.
++	 *
++	 * @since 7.0.0
++	 * @var int
++	 */
++	const MAX_BODY_SIZE = 16 * MB_IN_BYTES;
++
++	/**
++	 * Maximum number of rooms allowed per request.
++	 *
++	 * @since 7.0.0
++	 * @var int
++	 */
++	const MAX_ROOMS_PER_REQUEST = 50;
++
++	/**
++	 * Maximum allowed size for a single update's data field in bytes.
++	 *
++	 * @since 7.0.0
++	 * @var int
++	 */
++	const MAX_UPDATE_DATA_SIZE = MB_IN_BYTES;
++
++	/**
 +	 * Collaboration update type: compaction.
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -70,7 +71,7 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -46,7 +71,7 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_COMPACTION = 'compaction';
  
  	/**
@@ -627,7 +633,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -78,7 +79,7 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -54,7 +79,7 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_SYNC_STEP1 = 'sync_step1';
  
  	/**
@@ -636,7 +642,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -86,7 +87,7 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -62,7 +87,7 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_SYNC_STEP2 = 'sync_step2';
  
  	/**
@@ -645,7 +651,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -94,20 +95,21 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -70,20 +95,21 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_UPDATE = 'update';
  
  	/**
@@ -671,7 +677,19 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$this->storage = $storage;
  	}
  
-@@ -149,15 +151,26 @@ public function register_routes(): void {
+@@ -96,8 +122,9 @@ class WP_HTTP_Polling_Sync_Server {
+ 		$typed_update_args = array(
+ 			'properties' => array(
+ 				'data' => array(
+-					'type'     => 'string',
+-					'required' => true,
++					'type'      => 'string',
++					'required'  => true,
++					'maxLength' => self::MAX_UPDATE_DATA_SIZE,
+ 				),
+ 				'type' => array(
+ 					'type'     => 'string',
+@@ -124,15 +151,26 @@ class WP_HTTP_Polling_Sync_Server {
  				'required' => true,
  				'type'     => array( 'object', 'null' ),
  			),
@@ -704,7 +722,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			),
  			'updates'   => array(
  				'items'    => $typed_update_args,
-@@ -167,32 +180,53 @@ public function register_routes(): void {
+@@ -142,30 +180,53 @@ class WP_HTTP_Polling_Sync_Server {
  			),
  		);
  
@@ -733,14 +751,12 @@ index a90821ab78d3e..b3a7907cb021c 100644
 -				'methods'             => array( WP_REST_Server::CREATABLE ),
 -				'callback'            => array( $this, 'handle_request' ),
 -				'permission_callback' => array( $this, 'check_permissions' ),
--				'validate_callback'   => array( $this, 'validate_request' ),
 -				'args'                => array(
 -					'rooms' => array(
 -						'items'    => array(
 -							'properties' => $room_args,
 -							'type'       => 'object',
 -						),
--						'maxItems' => self::MAX_ROOMS_PER_REQUEST,
 -						'required' => true,
 -						'type'     => 'array',
 -					),
@@ -775,7 +791,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 * @since 7.0.0
  	 *
  	 * @param WP_REST_Request $request The REST request.
-@@ -203,29 +237,15 @@ public function check_permissions( WP_REST_Request $request ) {
+@@ -176,29 +237,15 @@ class WP_HTTP_Polling_Sync_Server {
  		if ( ! current_user_can( 'edit_posts' ) ) {
  			return new WP_Error(
  				'rest_cannot_edit',
@@ -808,7 +824,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  
  			$type_parts   = explode( '/', $room, 2 );
  			$object_parts = explode( ':', $type_parts[1] ?? '', 2 );
-@@ -234,13 +254,13 @@ public function check_permissions( WP_REST_Request $request ) {
+@@ -207,13 +254,13 @@ class WP_HTTP_Polling_Sync_Server {
  			$entity_name = $object_parts[0];
  			$object_id   = $object_parts[1] ?? null;
  
@@ -826,44 +842,38 @@ index a90821ab78d3e..b3a7907cb021c 100644
  					),
  					array( 'status' => rest_authorization_required_code() )
  				);
-@@ -251,31 +271,29 @@ public function check_permissions( WP_REST_Request $request ) {
- 	}
- 
- 	/**
--	 * Validates that the request body does not exceed the maximum allowed size.
-+	 * Validates the incoming REST request.
- 	 *
--	 * Runs as the route-level validate_callback, after per-arg schema
--	 * validation has already passed.
-+	 * Checks that the raw request body does not exceed the maximum allowed size.
- 	 *
- 	 * @since 7.0.0
- 	 *
- 	 * @param WP_REST_Request $request The REST request.
--	 * @return true|WP_Error True if valid, WP_Error if the body is too large.
-+	 * @return true|WP_Error True if valid, WP_Error if body is too large.
- 	 */
- 	public function validate_request( WP_REST_Request $request ) {
- 		$body = $request->get_body();
- 		if ( is_string( $body ) && strlen( $body ) > self::MAX_BODY_SIZE ) {
- 			return new WP_Error(
--				'rest_sync_body_too_large',
-+				'rest_collaboration_body_too_large',
- 				__( 'Request body is too large.' ),
- 				array( 'status' => 413 )
- 			);
- 		}
--
- 		return true;
+@@ -224,7 +271,29 @@ class WP_HTTP_Polling_Sync_Server {
  	}
  
  	/**
 -	 * Handles request: stores sync updates and awareness data, and returns
++	 * Validates the incoming REST request.
++	 *
++	 * Checks that the raw request body does not exceed the maximum allowed size.
++	 *
++	 * @since 7.0.0
++	 *
++	 * @param WP_REST_Request $request The REST request.
++	 * @return true|WP_Error True if valid, WP_Error if body is too large.
++	 */
++	public function validate_request( WP_REST_Request $request ) {
++		$body = $request->get_body();
++		if ( is_string( $body ) && strlen( $body ) > self::MAX_BODY_SIZE ) {
++			return new WP_Error(
++				'rest_collaboration_body_too_large',
++				__( 'Request body is too large.' ),
++				array( 'status' => 413 )
++			);
++		}
++		return true;
++	}
++
++	/**
 +	 * Handles request: stores updates and awareness data, and returns
  	 * updates the client is missing.
  	 *
  	 * @since 7.0.0
-@@ -295,18 +313,22 @@ public function handle_request( WP_REST_Request $request ) {
+@@ -244,18 +313,22 @@ class WP_HTTP_Polling_Sync_Server {
  			$cursor    = $room_request['after'];
  			$room      = $room_request['room'];
  
@@ -889,7 +899,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  				if ( is_wp_error( $result ) ) {
  					return $result;
  				}
-@@ -323,57 +345,46 @@ public function handle_request( WP_REST_Request $request ) {
+@@ -272,7 +345,7 @@ class WP_HTTP_Polling_Sync_Server {
  	}
  
  	/**
@@ -898,68 +908,38 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 *
- 	 * @param string      $entity_kind The entity kind, e.g. 'postType', 'taxonomy', 'root'.
- 	 * @param string      $entity_name The entity name, e.g. 'post', 'category', 'site'.
--	 * @param string|null $object_id   The numeric object ID / entity key for single entities, null for collections.
-+	 * @param string|null $object_id   The object ID / entity key for single entities, null for collections.
+@@ -281,16 +354,26 @@ class WP_HTTP_Polling_Sync_Server {
+ 	 * @param string|null $object_id   The object ID / entity key for single entities, null for collections.
  	 * @return bool True if user has permission, otherwise false.
  	 */
 -	private function can_user_sync_entity_type( string $entity_kind, string $entity_name, ?string $object_id ): bool {
--		if ( is_string( $object_id ) ) {
--			if ( ! ctype_digit( $object_id ) ) {
--				return false;
--			}
--			$object_id = (int) $object_id;
--		}
--		if ( null !== $object_id && $object_id <= 0 ) {
--			// Object ID must be numeric if provided.
 +	private function can_user_collaborate_on_entity_type( string $entity_kind, string $entity_name, ?string $object_id ): bool {
 +		// Reject non-numeric object IDs early.
 +		if ( ! is_null( $object_id ) && ! is_numeric( $object_id ) ) {
- 			return false;
- 		}
- 
--		// Validate permissions for the provided object ID.
--		if ( is_int( $object_id ) ) {
--			// Handle single post type entities with a defined object ID.
--			if ( 'postType' === $entity_kind ) {
--				if ( get_post_type( $object_id ) !== $entity_name ) {
--					// Post is not of the specified post type.
--					return false;
--				}
--				return current_user_can( 'edit_post', $object_id );
-+		// Handle single post type entities with a defined object ID.
-+		if ( 'postType' === $entity_kind && is_numeric( $object_id ) ) {
++			return false;
++		}
++
+ 		// Handle single post type entities with a defined object ID.
+ 		if ( 'postType' === $entity_kind && is_numeric( $object_id ) ) {
 +			if ( get_post_type( $object_id ) !== $entity_name ) {
 +				return false;
- 			}
-+			return current_user_can( 'edit_post', (int) $object_id );
-+		}
++			}
+ 			return current_user_can( 'edit_post', (int) $object_id );
+ 		}
  
--			// Handle single taxonomy term entities with a defined object ID.
--			if ( 'taxonomy' === $entity_kind ) {
--				$term_exists = term_exists( $object_id, $entity_name );
--				if ( ! is_array( $term_exists ) || ! isset( $term_exists['term_id'] ) ) {
--					// Either term doesn't exist OR term is not in specified taxonomy.
--					return false;
--				}
--
--				return current_user_can( 'edit_term', $object_id );
-+		// Handle single taxonomy term entities with a defined object ID.
-+		if ( 'taxonomy' === $entity_kind && is_numeric( $object_id ) ) {
+ 		// Handle single taxonomy term entities with a defined object ID.
+ 		if ( 'taxonomy' === $entity_kind && is_numeric( $object_id ) ) {
+-			$taxonomy = get_taxonomy( $entity_name );
+-			return isset( $taxonomy->cap->assign_terms ) && current_user_can( $taxonomy->cap->assign_terms );
 +			if ( ! term_exists( (int) $object_id, $entity_name ) ) {
 +				return false;
- 			}
++			}
 +			return current_user_can( 'assign_term', (int) $object_id );
-+		}
+ 		}
  
--			// Handle single comment entities with a defined object ID.
--			if ( 'root' === $entity_kind && 'comment' === $entity_name ) {
--				return current_user_can( 'edit_comment', $object_id );
--			}
-+		// Handle single comment entities with a defined object ID.
-+		if ( 'root' === $entity_kind && 'comment' === $entity_name && is_numeric( $object_id ) ) {
-+			return current_user_can( 'edit_comment', (int) $object_id );
+ 		// Handle single comment entities with a defined object ID.
+@@ -298,8 +381,10 @@ class WP_HTTP_Polling_Sync_Server {
+ 			return current_user_can( 'edit_comment', (int) $object_id );
  		}
  
 -		// All the remaining checks are for collections. If an object ID is provided,
@@ -971,7 +951,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		if ( null !== $object_id ) {
  			return false;
  		}
-@@ -388,9 +399,11 @@ private function can_user_sync_entity_type( string $entity_kind, string $entity_
+@@ -314,9 +399,11 @@ class WP_HTTP_Polling_Sync_Server {
  			return current_user_can( $post_type_object->cap->edit_posts );
  		}
  
@@ -986,7 +966,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$allowed_collection_entity_kinds = array(
  			'postType',
  			'root',
-@@ -403,66 +416,68 @@ private function can_user_sync_entity_type( string $entity_kind, string $entity_
+@@ -329,66 +416,68 @@ class WP_HTTP_Polling_Sync_Server {
  	/**
  	 * Processes and stores an awareness update from a client.
  	 *
@@ -1088,7 +1068,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$data = $update['data'];
  		$type = $update['type'];
  
-@@ -471,7 +486,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -397,7 +486,7 @@ class WP_HTTP_Polling_Sync_Server {
  				/*
  				 * Compaction replaces updates the client has already seen. Only remove
  				 * updates with markers before the client's cursor to preserve updates
@@ -1097,7 +1077,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  				 *
  				 * Check for a newer compaction update first. If one exists, skip this
  				 * compaction to avoid overwriting it.
-@@ -487,19 +502,39 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -413,19 +502,39 @@ class WP_HTTP_Polling_Sync_Server {
  				}
  
  				if ( ! $has_newer_compaction ) {
@@ -1143,7 +1123,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  				return true;
  
  			case self::UPDATE_TYPE_SYNC_STEP1:
-@@ -519,7 +554,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -445,7 +554,7 @@ class WP_HTTP_Polling_Sync_Server {
  
  		return new WP_Error(
  			'rest_invalid_update_type',
@@ -1152,7 +1132,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			array( 'status' => 400 )
  		);
  	}
-@@ -530,12 +565,12 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -456,12 +565,12 @@ class WP_HTTP_Polling_Sync_Server {
  	 * @since 7.0.0
  	 *
  	 * @param string $room      Room identifier.
@@ -1167,7 +1147,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$update = array(
  			'client_id' => $client_id,
  			'data'      => $data,
-@@ -543,10 +578,15 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -469,10 +578,15 @@ class WP_HTTP_Polling_Sync_Server {
  		);
  
  		if ( ! $this->storage->add_update( $room, $update ) ) {
@@ -1186,7 +1166,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			);
  		}
  
-@@ -554,7 +594,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -480,7 +594,7 @@ class WP_HTTP_Polling_Sync_Server {
  	}
  
  	/**
@@ -1195,7 +1175,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * Delegates cursor-based retrieval to the storage layer, then applies
  	 * client-specific filtering and compaction logic.
-@@ -562,7 +602,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -488,7 +602,7 @@ class WP_HTTP_Polling_Sync_Server {
  	 * @since 7.0.0
  	 *
  	 * @param string $room         Room identifier.
@@ -1204,7 +1184,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 * @param int    $cursor       Return updates after this cursor.
  	 * @param bool   $is_compactor True if this client is nominated to perform compaction.
  	 * @return array{
-@@ -573,7 +613,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -499,7 +613,7 @@ class WP_HTTP_Polling_Sync_Server {
  	 *   updates: array<int, array{data: string, type: string}>,
  	 * } Response data for this room.
  	 */
@@ -1213,10 +1193,10 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$updates_after_cursor = $this->storage->get_updates_after_cursor( $room, $cursor );
  		$total_updates        = $this->storage->get_update_count( $room );
  
-diff --git a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+diff --git a/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
 deleted file mode 100644
-index 658a9b65539dd..0000000000000
---- a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+index 658a9b6553..0000000000
+--- a/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
 +++ /dev/null
 @@ -1,378 +0,0 @@
 -<?php
@@ -1597,10 +1577,10 @@ index 658a9b65539dd..0000000000000
 -		return true;
 -	}
 -}
-diff --git a/src/wp-includes/collaboration/interface-wp-sync-storage.php b/src/wp-includes/collaboration/interface-wp-sync-storage.php
+diff --git a/wp-includes/collaboration/interface-wp-sync-storage.php b/wp-includes/collaboration/interface-wp-sync-storage.php
 deleted file mode 100644
-index d84dbeb1e4aae..0000000000000
---- a/src/wp-includes/collaboration/interface-wp-sync-storage.php
+index d84dbeb1e4..0000000000
+--- a/wp-includes/collaboration/interface-wp-sync-storage.php
 +++ /dev/null
 @@ -1,86 +0,0 @@
 -<?php
@@ -1689,11 +1669,11 @@ index d84dbeb1e4aae..0000000000000
 -	 */
 -	public function set_awareness_state( string $room, array $awareness ): bool;
 -}
-diff --git a/src/wp-includes/default-filters.php b/src/wp-includes/default-filters.php
-index 4b6d9de25fa11..17c1695e6d72d 100644
---- a/src/wp-includes/default-filters.php
-+++ b/src/wp-includes/default-filters.php
-@@ -454,6 +454,7 @@
+diff --git a/wp-includes/default-filters.php b/wp-includes/default-filters.php
+index 4b6d9de25f..17c1695e6d 100644
+--- a/wp-includes/default-filters.php
++++ b/wp-includes/default-filters.php
+@@ -454,6 +454,7 @@ add_action( 'wp_scheduled_auto_draft_delete', 'wp_delete_auto_drafts' );
  add_action( 'importer_scheduled_cleanup', 'wp_delete_attachment' );
  add_action( 'upgrader_scheduled_cleanup', 'wp_delete_attachment' );
  add_action( 'delete_expired_transients', 'delete_expired_transients' );
@@ -1701,10 +1681,10 @@ index 4b6d9de25fa11..17c1695e6d72d 100644
  
  // Navigation menu actions.
  add_action( 'delete_post', '_wp_delete_post_menu_item' );
-diff --git a/src/wp-includes/post.php b/src/wp-includes/post.php
-index b225d35c48b2a..938a6efb6ae3b 100644
---- a/src/wp-includes/post.php
-+++ b/src/wp-includes/post.php
+diff --git a/wp-includes/post.php b/wp-includes/post.php
+index 215fa153f7..a51bf46e28 100644
+--- a/wp-includes/post.php
++++ b/wp-includes/post.php
 @@ -657,42 +657,6 @@ function create_initial_post_types() {
  		)
  	);
@@ -1748,10 +1728,10 @@ index b225d35c48b2a..938a6efb6ae3b 100644
  	register_post_status(
  		'publish',
  		array(
-diff --git a/src/wp-includes/rest-api.php b/src/wp-includes/rest-api.php
-index c524f9e22a12f..688b236556fdf 100644
---- a/src/wp-includes/rest-api.php
-+++ b/src/wp-includes/rest-api.php
+diff --git a/wp-includes/rest-api.php b/wp-includes/rest-api.php
+index c524f9e22a..688b236556 100644
+--- a/wp-includes/rest-api.php
++++ b/wp-includes/rest-api.php
 @@ -431,9 +431,9 @@ function create_initial_rest_routes() {
  
  	// Collaboration.
@@ -1765,24 +1745,32 @@ index c524f9e22a12f..688b236556fdf 100644
  	}
  }
  
-diff --git a/src/wp-includes/version.php b/src/wp-includes/version.php
-index 934e5d0bb5369..59b4142166a96 100644
---- a/src/wp-includes/version.php
-+++ b/src/wp-includes/version.php
-@@ -23,7 +23,7 @@
+diff --git a/wp-includes/version.php b/wp-includes/version.php
+index 79f3d74a37..bf97d05440 100644
+--- a/wp-includes/version.php
++++ b/wp-includes/version.php
+@@ -16,14 +16,14 @@
+  *
+  * @global string $wp_version
+  */
+-$wp_version = '7.0-RC2-62242';
++$wp_version = '7.0-RC2-20260424.010121';
+ 
+ /**
+  * Holds the WordPress DB revision, increments when changes are made to the WordPress DB schema.
   *
   * @global int $wp_db_version
   */
 -$wp_db_version = 61833;
-+$wp_db_version = 61842;
-
++$wp_db_version = 61841;
+ 
  /**
   * Holds the TinyMCE version.
-diff --git a/src/wp-settings.php b/src/wp-settings.php
-index dab1d8fd4c0de..f7e09e2c10ea4 100644
---- a/src/wp-settings.php
-+++ b/src/wp-settings.php
-@@ -310,9 +310,8 @@
+diff --git a/wp-settings.php b/wp-settings.php
+index dab1d8fd4c..f7e09e2c10 100644
+--- a/wp-settings.php
++++ b/wp-settings.php
+@@ -310,9 +310,8 @@ require ABSPATH . WPINC . '/abilities-api/class-wp-ability.php';
  require ABSPATH . WPINC . '/abilities-api/class-wp-abilities-registry.php';
  require ABSPATH . WPINC . '/abilities-api.php';
  require ABSPATH . WPINC . '/abilities.php';

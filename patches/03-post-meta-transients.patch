@@ -1,8 +1,8 @@
-diff --git a/src/wp-includes/class-wp-query.php b/src/wp-includes/class-wp-query.php
-index cf07b07d977c3..fa337981d31bc 100644
---- a/src/wp-includes/class-wp-query.php
-+++ b/src/wp-includes/class-wp-query.php
-@@ -2473,6 +2473,20 @@ public function get_posts() {
+diff --git a/wp-includes/class-wp-query.php b/wp-includes/class-wp-query.php
+index cf07b07d97..fa337981d3 100644
+--- a/wp-includes/class-wp-query.php
++++ b/wp-includes/class-wp-query.php
+@@ -2473,6 +2473,20 @@ class WP_Query {
  			$clauses = $this->meta_query->get_sql( 'post', $wpdb->posts, 'ID', $this );
  			$join   .= $clauses['join'];
  			$where  .= $clauses['where'];
@@ -23,11 +23,11 @@ index cf07b07d977c3..fa337981d31bc 100644
  		}
  
  		$rand = ( isset( $query_vars['orderby'] ) && 'rand' === $query_vars['orderby'] );
-diff --git a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-index 88554a48c7d54..c02dd9af67c30 100644
---- a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-+++ b/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-@@ -355,12 +355,33 @@ private function process_awareness_update( string $room, int $client_id, ?array
+diff --git a/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/wp-includes/collaboration/class-wp-http-polling-sync-server.php
+index 88554a48c7..c02dd9af67 100644
+--- a/wp-includes/collaboration/class-wp-http-polling-sync-server.php
++++ b/wp-includes/collaboration/class-wp-http-polling-sync-server.php
+@@ -355,12 +355,33 @@ class WP_HTTP_Polling_Sync_Server {
  			$updated_awareness[] = $entry;
  		}
  
@@ -62,10 +62,10 @@ index 88554a48c7d54..c02dd9af67c30 100644
  				'wp_user_id' => get_current_user_id(),
  			);
  		}
-diff --git a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
-index 658a9b65539dd..32d9b3afa8028 100644
---- a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
-+++ b/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+diff --git a/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+index 658a9b6553..32d9b3afa8 100644
+--- a/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
++++ b/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
 @@ -30,7 +30,7 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
  	 * @since 7.0.0
  	 * @var string
@@ -111,7 +111,7 @@ index 658a9b65539dd..32d9b3afa8028 100644
  	}
  
  	/**
-@@ -102,40 +89,19 @@ public function add_update( string $room, $update ): bool {
+@@ -102,40 +89,19 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
  	 *
  	 * @since 7.0.0
  	 *
@@ -156,7 +156,7 @@ index 658a9b65539dd..32d9b3afa8028 100644
  		return array_values( $awareness );
  	}
  
-@@ -144,54 +110,24 @@ public function get_awareness_state( string $room ): array {
+@@ -144,54 +110,24 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
  	 *
  	 * @since 7.0.0
  	 *
@@ -224,7 +224,7 @@ index 658a9b65539dd..32d9b3afa8028 100644
  	}
  
  	/**
-@@ -281,8 +217,6 @@ public function get_update_count( string $room ): int {
+@@ -281,8 +217,6 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
  	 *
  	 * @since 7.0.0
  	 *
@@ -233,7 +233,7 @@ index 658a9b65539dd..32d9b3afa8028 100644
  	 * @param string $room   Room identifier.
  	 * @param int    $cursor Return updates after this cursor (meta_id).
  	 * @return array<int, mixed> Sync updates.
-@@ -332,10 +266,7 @@ public function get_updates_after_cursor( string $room, int $cursor ): array {
+@@ -332,10 +266,7 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
  
  		$updates = array();
  		foreach ( $rows as $row ) {
@@ -245,7 +245,7 @@ index 658a9b65539dd..32d9b3afa8028 100644
  		}
  
  		return $updates;
-@@ -346,8 +277,6 @@ public function get_updates_after_cursor( string $room, int $cursor ): array {
+@@ -346,8 +277,6 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
  	 *
  	 * @since 7.0.0
  	 *
@@ -254,7 +254,7 @@ index 658a9b65539dd..32d9b3afa8028 100644
  	 * @param string $room   Room identifier.
  	 * @param int    $cursor Remove updates with meta_id < this cursor.
  	 * @return bool True on success, false on failure.
-@@ -373,6 +302,7 @@ public function remove_updates_before_cursor( string $room, int $cursor ): bool
+@@ -373,6 +302,7 @@ class WP_Sync_Post_Meta_Storage implements WP_Sync_Storage {
  			return false;
  		}
  
@@ -262,11 +262,11 @@ index 658a9b65539dd..32d9b3afa8028 100644
  		return true;
  	}
  }
-diff --git a/src/wp-includes/default-filters.php b/src/wp-includes/default-filters.php
-index 4b6d9de25fa11..74a7b1dc02697 100644
---- a/src/wp-includes/default-filters.php
-+++ b/src/wp-includes/default-filters.php
-@@ -122,9 +122,10 @@
+diff --git a/wp-includes/default-filters.php b/wp-includes/default-filters.php
+index 4b6d9de25f..74a7b1dc02 100644
+--- a/wp-includes/default-filters.php
++++ b/wp-includes/default-filters.php
+@@ -122,9 +122,10 @@ foreach ( array( 'user_register', 'deleted_user' ) as $action ) {
  }
  
  // Post meta.
@@ -280,7 +280,7 @@ index 4b6d9de25fa11..74a7b1dc02697 100644
  
  // User meta.
  add_action( 'added_user_meta', 'wp_cache_set_users_last_changed' );
-@@ -769,9 +770,6 @@
+@@ -769,9 +770,6 @@ add_filter( 'render_block', 'wp_render_typography_support', 10, 2 );
  // User preferences.
  add_action( 'init', 'wp_register_persisted_preferences_meta' );
  
@@ -290,10 +290,10 @@ index 4b6d9de25fa11..74a7b1dc02697 100644
  // Include revisioned meta when considering whether a post revision has changed.
  add_filter( 'wp_save_post_revision_post_has_changed', 'wp_check_revisioned_meta_fields_have_changed', 10, 3 );
  
-diff --git a/src/wp-includes/meta.php b/src/wp-includes/meta.php
-index c657c6c2e7af3..a32e19f0cf7ab 100644
---- a/src/wp-includes/meta.php
-+++ b/src/wp-includes/meta.php
+diff --git a/wp-includes/meta.php b/wp-includes/meta.php
+index c657c6c2e7..a32e19f0cf 100644
+--- a/wp-includes/meta.php
++++ b/wp-includes/meta.php
 @@ -1396,6 +1396,7 @@ function sanitize_meta( $meta_key, $meta_value, $object_type, $object_subtype =
   * @since 5.5.0 The `$default` argument was added to the arguments array.
   * @since 6.4.0 The `$revisions_enabled` argument was added to the arguments array.
@@ -375,10 +375,10 @@ index c657c6c2e7af3..a32e19f0cf7ab 100644
  	// If `auth_callback` is not provided, fall back to `is_protected_meta()`.
  	if ( empty( $args['auth_callback'] ) ) {
  		if ( is_protected_meta( $meta_key, $object_type ) ) {
-diff --git a/src/wp-includes/post.php b/src/wp-includes/post.php
-index 215fa153f7495..9af3193e71055 100644
---- a/src/wp-includes/post.php
-+++ b/src/wp-includes/post.php
+diff --git a/wp-includes/post.php b/wp-includes/post.php
+index 215fa153f7..9af3193e71 100644
+--- a/wp-includes/post.php
++++ b/wp-includes/post.php
 @@ -8445,6 +8445,51 @@ function wp_add_trashed_suffix_to_post_name_for_post( $post ) {
   */
  function wp_cache_set_posts_last_changed() {
@@ -473,3 +473,16 @@ index 215fa153f7495..9af3193e71055 100644
 +		);
  	}
  }
+diff --git a/wp-includes/version.php b/wp-includes/version.php
+index 79f3d74a37..cdd60ea5a5 100644
+--- a/wp-includes/version.php
++++ b/wp-includes/version.php
+@@ -16,7 +16,7 @@
+  *
+  * @global string $wp_version
+  */
+-$wp_version = '7.0-RC2-62242';
++$wp_version = '7.0-RC2-20260424.010944';
+ 
+ /**
+  * Holds the WordPress DB revision, increments when changes are made to the WordPress DB schema.

@@ -1,8 +1,8 @@
-diff --git a/src/wp-admin/admin.php b/src/wp-admin/admin.php
-index 82ab6b93ac99e..3634c8c29c20d 100644
---- a/src/wp-admin/admin.php
-+++ b/src/wp-admin/admin.php
-@@ -113,6 +113,14 @@
+diff --git a/wp-admin/admin.php b/wp-admin/admin.php
+index 82ab6b93ac..3634c8c29c 100644
+--- a/wp-admin/admin.php
++++ b/wp-admin/admin.php
+@@ -113,6 +113,14 @@ if ( ! wp_next_scheduled( 'delete_expired_transients' ) && ! wp_installing() ) {
  	wp_schedule_event( time(), 'daily', 'delete_expired_transients' );
  }
  
@@ -17,11 +17,11 @@ index 82ab6b93ac99e..3634c8c29c20d 100644
  set_screen_options();
  
  $date_format = __( 'F j, Y' );
-diff --git a/src/wp-admin/includes/schema.php b/src/wp-admin/includes/schema.php
-index 340bdebac71eb..1c7b40b71c498 100644
---- a/src/wp-admin/includes/schema.php
-+++ b/src/wp-admin/includes/schema.php
-@@ -186,6 +186,20 @@ function wp_get_db_schema( $scope = 'all', $blog_id = null ) {
+diff --git a/wp-admin/includes/schema.php b/wp-admin/includes/schema.php
+index 340bdebac7..7f797eb0c7 100644
+--- a/wp-admin/includes/schema.php
++++ b/wp-admin/includes/schema.php
+@@ -186,6 +186,19 @@ CREATE TABLE $wpdb->posts (
  	KEY post_parent (post_parent),
  	KEY post_author (post_author),
  	KEY type_status_author (post_type,post_status,post_author)
@@ -37,15 +37,14 @@ index 340bdebac71eb..1c7b40b71c498 100644
 +	PRIMARY KEY  (id),
 +	KEY type_client_id (type,client_id),
 +	KEY room (room,id),
-+	KEY room_type_date (room,type,date_gmt),
 +	KEY date_gmt (date_gmt)
  ) $charset_collate;\n";
  
  	// Single site users table. The multisite flavor of the users table is handled below.
-diff --git a/src/wp-admin/includes/upgrade.php b/src/wp-admin/includes/upgrade.php
-index 914113bde00d0..dde5b44f0abbf 100644
---- a/src/wp-admin/includes/upgrade.php
-+++ b/src/wp-admin/includes/upgrade.php
+diff --git a/wp-admin/includes/upgrade.php b/wp-admin/includes/upgrade.php
+index 6adb0521ff..a601be26bc 100644
+--- a/wp-admin/includes/upgrade.php
++++ b/wp-admin/includes/upgrade.php
 @@ -886,7 +886,7 @@ function upgrade_all() {
  		upgrade_682();
  	}
@@ -55,10 +54,10 @@ index 914113bde00d0..dde5b44f0abbf 100644
  		upgrade_700();
  	}
  
-diff --git a/src/wp-includes/class-wpdb.php b/src/wp-includes/class-wpdb.php
-index e5300e6d75122..f22ac010cc975 100644
---- a/src/wp-includes/class-wpdb.php
-+++ b/src/wp-includes/class-wpdb.php
+diff --git a/wp-includes/class-wpdb.php b/wp-includes/class-wpdb.php
+index 23c865b87d..f4da31dc57 100644
+--- a/wp-includes/class-wpdb.php
++++ b/wp-includes/class-wpdb.php
 @@ -299,6 +299,7 @@ class wpdb {
  		'term_relationships',
  		'termmeta',
@@ -83,40 +82,70 @@ index e5300e6d75122..f22ac010cc975 100644
  	/**
  	 * WordPress Terms table.
  	 *
-diff --git a/src/wp-includes/collaboration.php b/src/wp-includes/collaboration.php
-index 11698a2ac78f4..350b6cf1b21b0 100644
---- a/src/wp-includes/collaboration.php
-+++ b/src/wp-includes/collaboration.php
-@@ -11,7 +11,8 @@
-  *
-  * If the WP_ALLOW_COLLABORATION constant is false,
-  * collaboration is always disabled regardless of the database option.
-- * Otherwise, falls back to the 'wp_collaboration_enabled' option.
-+ * Otherwise, the feature requires both the 'wp_collaboration_enabled'
-+ * option and the database schema introduced in db_version 61841.
-  *
-  * @since 7.0.0
-  *
-@@ -20,7 +21,8 @@
- function wp_is_collaboration_enabled() {
- 	return (
- 		wp_is_collaboration_allowed() &&
--		(bool) get_option( 'wp_collaboration_enabled' )
-+		get_option( 'wp_collaboration_enabled' ) &&
-+		get_option( 'db_version' ) >= 61841
- 	);
- }
+diff --git a/wp-includes/collaboration.php b/wp-includes/collaboration.php
+index 11698a2ac7..a9efe66451 100644
+--- a/wp-includes/collaboration.php
++++ b/wp-includes/collaboration.php
+@@ -7,52 +7,18 @@
+  */
  
-@@ -34,7 +36,7 @@ function wp_is_collaboration_enabled() {
+ /**
+- * Determines whether real-time collaboration is enabled.
++ * Checks whether real-time collaboration is enabled.
+  *
+- * If the WP_ALLOW_COLLABORATION constant is false,
+- * collaboration is always disabled regardless of the database option.
+- * Otherwise, falls back to the 'wp_collaboration_enabled' option.
++ * The feature requires both the site option and the database schema
++ * introduced in db_version 61841.
   *
   * @since 7.0.0
   *
 - * @return bool Whether real-time collaboration is enabled.
-+ * @return bool Whether real-time collaboration is allowed.
++ * @return bool True if collaboration is enabled, false otherwise.
   */
- function wp_is_collaboration_allowed() {
- 	if ( ! defined( 'WP_ALLOW_COLLABORATION' ) ) {
-@@ -83,3 +85,41 @@ function wp_collaboration_inject_setting() {
+ function wp_is_collaboration_enabled() {
+-	return (
+-		wp_is_collaboration_allowed() &&
+-		(bool) get_option( 'wp_collaboration_enabled' )
+-	);
+-}
+-
+-/**
+- * Determines whether real-time collaboration is allowed.
+- *
+- * If the WP_ALLOW_COLLABORATION constant is false,
+- * collaboration is not allowed and cannot be enabled.
+- * The constant defaults to true, unless the WP_ALLOW_COLLABORATION
+- * environment variable is set to string "false".
+- *
+- * @since 7.0.0
+- *
+- * @return bool Whether real-time collaboration is enabled.
+- */
+-function wp_is_collaboration_allowed() {
+-	if ( ! defined( 'WP_ALLOW_COLLABORATION' ) ) {
+-		$env_value = getenv( 'WP_ALLOW_COLLABORATION' );
+-		if ( false === $env_value ) {
+-			// Environment variable is not defined, default to allowing collaboration.
+-			define( 'WP_ALLOW_COLLABORATION', true );
+-		} else {
+-			/*
+-			 * Environment variable is defined, let's confirm it is actually set to
+-			 * "true" as it may still have a string value "false" – the preceeding
+-			 * `if` branch only tests for the boolean `false`.
+-			 */
+-			define( 'WP_ALLOW_COLLABORATION', 'true' === $env_value );
+-		}
+-	}
+-
+-	return WP_ALLOW_COLLABORATION;
++	return get_option( 'wp_enable_real_time_collaboration' )
++		&& get_option( 'db_version' ) >= 61841;
+ }
+ 
+ /**
+@@ -83,3 +49,36 @@ function wp_collaboration_inject_setting() {
  		'after'
  	);
  }
@@ -131,21 +160,16 @@ index 11698a2ac78f4..350b6cf1b21b0 100644
 + * @since 7.0.0
 + */
 +function wp_delete_old_collaboration_data() {
-+	global $wpdb;
-+
 +	if ( ! wp_is_collaboration_enabled() ) {
-+		/*
-+		 * Collaboration was enabled in the past but has since been disabled.
-+		 * Unschedule the cron job prior to clean up so this callback does not
-+		 * continue to run.
-+		 */
-+		wp_clear_scheduled_hook( 'wp_delete_old_collaboration_data' );
++		return;
 +	}
 +
-+	/* Clean up rows older than 7 days. */
++	global $wpdb;
++
++	// Clean up sync rows older than 7 days.
 +	$wpdb->query(
 +		$wpdb->prepare(
-+			"DELETE FROM {$wpdb->collaboration} WHERE date_gmt < %s",
++			"DELETE FROM {$wpdb->collaboration} WHERE type != 'awareness' AND date_gmt < %s",
 +			gmdate( 'Y-m-d H:i:s', time() - WEEK_IN_SECONDS )
 +		)
 +	);
@@ -158,12 +182,12 @@ index 11698a2ac78f4..350b6cf1b21b0 100644
 +		)
 +	);
 +}
-diff --git a/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
+diff --git a/wp-includes/collaboration/class-wp-collaboration-table-storage.php b/wp-includes/collaboration/class-wp-collaboration-table-storage.php
 new file mode 100644
-index 0000000000000..fe73786b7443a
+index 0000000000..7827a71dd6
 --- /dev/null
-+++ b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
-@@ -0,0 +1,459 @@
++++ b/wp-includes/collaboration/class-wp-collaboration-table-storage.php
+@@ -0,0 +1,367 @@
 +<?php
 +/**
 + * WP_Collaboration_Table_Storage class
@@ -222,10 +246,6 @@ index 0000000000000..fe73786b7443a
 +	public function add_update( string $room, $update ): bool {
 +		global $wpdb;
 +
-+		if ( '' === $room || empty( $update['type'] ) || empty( $update['client_id'] ) ) {
-+			return false;
-+		}
-+
 +		$result = $wpdb->insert(
 +			$wpdb->collaboration,
 +			array(
@@ -234,24 +254,11 @@ index 0000000000000..fe73786b7443a
 +				'client_id' => $update['client_id'] ?? '',
 +				'data'      => wp_json_encode( $update ),
 +				'date_gmt'  => gmdate( 'Y-m-d H:i:s' ),
-+				'user_id'   => get_current_user_id(),
 +			),
-+			array( '%s', '%s', '%s', '%s', '%s', '%d' )
++			array( '%s', '%s', '%s', '%s', '%s' )
 +		);
 +
 +		return false !== $result;
-+	}
-+
-+	/**
-+	 * Generates a cache key for awareness data for a given room.
-+	 *
-+	 * @since 7.0.0
-+	 *
-+	 * @param string $room Room identifier.
-+	 * @return string Cache key for the room's awareness data.
-+	 */
-+	public function get_awareness_cache_key( string $room ): string {
-+		return 'awareness::' . str_replace( '/', ':', $room );
 +	}
 +
 +	/**
@@ -277,70 +284,43 @@ index 0000000000000..fe73786b7443a
 +	 * @phpstan-return list<AwarenessState>
 +	 */
 +	public function get_awareness_state( string $room, int $timeout = 30 ): array {
++		$cache_key = 'awareness:' . $room;
++		$cached    = wp_cache_get( $cache_key, 'collaboration' );
++
++		if ( false !== $cached ) {
++			return $cached;
++		}
++
 +		global $wpdb;
 +
-+		$cutoff_timestamp = time() - $timeout;
-+		$cutoff_mysql     = gmdate( 'Y-m-d H:i:s', $cutoff_timestamp );
-+		$cache_key        = $this->get_awareness_cache_key( $room );
-+		$cached           = wp_cache_get( $cache_key, 'collaboration' );
-+
-+		if ( false !== $cached && is_array( $cached ) ) {
-+			// Deterministic ordering.
-+			$cached_awareness = wp_list_sort( $cached, 'client_id' );
-+
-+			// Remove out of date entries and duplicate entries.
-+			$entries = array();
-+			foreach ( $cached_awareness as $client_awareness ) {
-+				if ( empty( $client_awareness['timestamp'] ) || $client_awareness['timestamp'] < $cutoff_timestamp ) {
-+					continue;
-+				}
-+				// Account for duplicates added by race conditions.
-+				$entries[ $client_awareness['client_id'] ] = $client_awareness;
-+			}
-+
-+			return array_values( $entries );
-+		} elseif ( false !== $cached ) {
-+			// Cache is corrupted, delete it.
-+			wp_cache_delete( $cache_key, 'collaboration' );
-+		}
-+
-+		if ( wp_using_ext_object_cache() ) {
-+			// Sites with a persistent cache do not use the database.
-+			return array();
-+		}
++		$cutoff = gmdate( 'Y-m-d H:i:s', time() - $timeout );
 +
 +		$rows = $wpdb->get_results(
 +			$wpdb->prepare(
-+				"SELECT client_id, user_id, date_gmt, data FROM {$wpdb->collaboration} WHERE room = %s AND type = 'awareness' AND date_gmt >= %s ORDER BY id ASC",
++				"SELECT client_id, user_id, data FROM {$wpdb->collaboration} WHERE room = %s AND type = 'awareness' AND date_gmt >= %s",
 +				$room,
-+				$cutoff_mysql
++				$cutoff
 +			)
 +		);
 +
 +		if ( ! is_array( $rows ) ) {
-+			$entries = array();
-+			wp_cache_set( $cache_key, $entries, 'collaboration', HOUR_IN_SECONDS );
-+			return $entries;
++			return array();
 +		}
 +
 +		$entries = array();
 +		foreach ( $rows as $row ) {
-+			$date_time     = date_create_from_format( 'Y-m-d H:i:s', $row->date_gmt, new DateTimeZone( 'UTC' ) );
-+			$decoded_state = json_decode( $row->data, true );
-+			if ( is_array( $decoded_state ) && false !== $date_time ) {
-+				$entries[ $row->client_id ] = array(
++			$decoded = json_decode( $row->data, true );
++			if ( is_array( $decoded ) ) {
++				$entries[] = array(
 +					'client_id' => $row->client_id,
-+					'state'     => $decoded_state,
++					'state'     => $decoded,
 +					'user_id'   => (int) $row->user_id,
-+					'timestamp' => $date_time->getTimestamp(),
 +				);
 +			}
 +		}
 +
-+		$entries = array_values( $entries );
-+		// Deterministic ordering.
-+		$entries = wp_list_sort( $entries, 'client_id' );
-+		wp_cache_set( $cache_key, $entries, 'collaboration', HOUR_IN_SECONDS );
++		wp_cache_set( $cache_key, $entries, 'collaboration', $timeout );
++
 +		return $entries;
 +	}
 +
@@ -374,6 +354,13 @@ index 0000000000000..fe73786b7443a
 +	/**
 +	 * Retrieves updates from a room after a given cursor.
 +	 *
++	 * Uses a snapshot approach: captures MAX(id) and COUNT(*) in a single
++	 * query, then fetches rows WHERE id > cursor AND id <= max_id. Updates
++	 * arriving after the snapshot are deferred to the next poll, never lost.
++	 *
++	 * Only retrieves non-awareness rows — awareness rows are handled
++	 * separately via get_awareness_state().
++	 *
 +	 * @since 7.0.0
 +	 *
 +	 * @global wpdb $wpdb WordPress database abstraction object.
@@ -385,16 +372,8 @@ index 0000000000000..fe73786b7443a
 +	public function get_updates_after_cursor( string $room, int $cursor ): array {
 +		global $wpdb;
 +
-+		/*
-+		 * Uses a snapshot approach: captures MAX(id) and COUNT(*) in a single
-+		 * query, then fetches rows WHERE id > cursor AND id <= max_id. Updates
-+		 * arriving after the snapshot are deferred to the next poll, never lost.
-+		 *
-+		 * Only retrieves non-awareness rows — awareness rows are handled
-+		 * separately via get_awareness_state().
-+		 */
-+
-+		/* Snapshot the current max ID and total row count in a single query. */
++		// Snapshot the current max ID and total row count in a single query.
++		// Excludes awareness rows — they are not sync updates.
 +		$snapshot = $wpdb->get_row(
 +			$wpdb->prepare(
 +				"SELECT COALESCE( MAX( id ), 0 ) AS max_id, COUNT(*) AS total FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness'",
@@ -414,18 +393,16 @@ index 0000000000000..fe73786b7443a
 +		$this->room_cursors[ $room ] = $max_id;
 +
 +		if ( 0 === $max_id || $max_id <= $cursor ) {
-+			/*
-+			 * Preserve the real row count so the server can still
-+			 * trigger compaction when updates have accumulated but
-+			 * no new ones arrived since the client's last poll.
-+			 */
++			// Preserve the real row count so the server can still
++			// trigger compaction when updates have accumulated but
++			// no new ones arrived since the client's last poll.
 +			$this->room_update_counts[ $room ] = $total;
 +			return array();
 +		}
 +
 +		$this->room_update_counts[ $room ] = $total;
 +
-+		/* Fetch updates after the cursor up to the snapshot boundary. */
++		// Fetch updates after the cursor up to the snapshot boundary.
 +		$rows = $wpdb->get_results(
 +			$wpdb->prepare(
 +				"SELECT data FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness' AND id > %d AND id <= %d ORDER BY id ASC",
@@ -451,21 +428,22 @@ index 0000000000000..fe73786b7443a
 +	}
 +
 +	/**
-+	 * Removes updates from a room up to and including the given cursor.
++	 * Removes updates from a room that are older than the given cursor.
++	 *
++	 * Uses a single atomic DELETE query, avoiding the race-prone
++	 * "delete all, re-add some" pattern.
 +	 *
 +	 * @since 7.0.0
 +	 *
 +	 * @global wpdb $wpdb WordPress database abstraction object.
 +	 *
 +	 * @param string $room   Room identifier.
-+	 * @param int    $cursor Remove updates up to and including this cursor.
++	 * @param int    $cursor Remove updates with id <= this cursor.
 +	 * @return bool True on success, false on failure.
 +	 */
-+	public function remove_updates_through_cursor( string $room, int $cursor ): bool {
++	public function remove_updates_before_cursor( string $room, int $cursor ): bool {
 +		global $wpdb;
 +
-+		// Uses a single atomic DELETE query, avoiding the race-prone
-+		// "delete all, re-add some" pattern.
 +		$result = $wpdb->query(
 +			$wpdb->prepare(
 +				"DELETE FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness' AND id <= %d",
@@ -480,10 +458,10 @@ index 0000000000000..fe73786b7443a
 +	/**
 +	 * Sets awareness state for a given client in a room.
 +	 *
-+	 * Uses SELECT-then-UPDATE/INSERT: checks for an existing row by
-+	 * primary key, then updates or inserts accordingly. Each client
-+	 * writes only its own row, eliminating the race condition inherent
-+	 * in shared-state approaches.
++	 * Uses UPDATE-then-INSERT: tries to update the existing row first,
++	 * and only inserts if no row was updated. Each client writes only
++	 * its own row, eliminating the race condition inherent in shared-state
++	 * approaches.
 +	 *
 +	 * After writing, the cached awareness entries for the room are updated
 +	 * in-place so that subsequent get_awareness_state() calls from other
@@ -496,111 +474,35 @@ index 0000000000000..fe73786b7443a
 +	 *
 +	 * @global wpdb $wpdb WordPress database abstraction object.
 +	 *
-+	 * @param string               $room      Room identifier.
++	 * @param string               $room    Room identifier.
 +	 * @param string               $client_id Client identifier.
-+	 * @param array<string, mixed> $state     Serializable awareness state for this client.
-+	 * @param int                  $user_id   WordPress user ID that owns this client.
++	 * @param array<string, mixed> $state   Serializable awareness state for this client.
++	 * @param int                  $user_id WordPress user ID that owns this client.
 +	 * @return bool True on success, false on failure.
 +	 */
 +	public function set_awareness_state( string $room, string $client_id, array $state, int $user_id ): bool {
 +		global $wpdb;
 +
-+		if ( '' === $room || '' === $client_id ) {
-+			return false;
-+		}
-+
-+		wp_recursive_ksort( $state );
-+
-+		/**
-+		 * Filters granularity used for rounding up a client's awareness timestamp.
-+		 *
-+		 * Modifies the granularity used when recording the latest time a client updates their
-+		 * awareness state. This allows implementations to increase or reduce the granularity
-+		 * of awareness updates for the desired balance of real-time updates and server load.
-+		 *
-+		 * The default awareness granularity of 10 seconds limits the number of writes to the
-+		 * database/object cache as the awareness state is only updated if the time has changed.
-+		 *
-+		 * @since 7.0.0
-+		 *
-+		 * @param int $granularity Granularity in seconds. Default 10.
-+		 */
-+		$granularity = absint( apply_filters( 'wp_sync_awareness_timestamp_granularity', 10 ) );
-+		if ( 0 === $granularity ) {
-+			$granularity = 1;
-+		}
-+
-+		$now_timestamp = (int) ceil( time() / $granularity ) * $granularity;
-+		$now_mysql     = gmdate( 'Y-m-d H:i:s', $now_timestamp );
-+		$cache_key     = $this->get_awareness_cache_key( $room );
-+
-+		if ( wp_using_ext_object_cache() ) {
-+			$awareness = $this->get_awareness_state( $room );
-+
-+			foreach ( $awareness as $index => $client_awareness ) {
-+				if (
-+					$client_awareness['client_id'] === $client_id
-+					&& $client_awareness['timestamp'] === $now_timestamp
-+					&& $client_awareness['state'] === $state
-+				) {
-+					// Cache already has the current client expiry and state, consider update a success (avoids cache thrashing).
-+					return true;
-+				}
-+
-+				if ( $client_awareness['client_id'] === $client_id ) {
-+					// Remove stale cache entry for the current client.
-+					unset( $awareness[ $index ] );
-+					break;
-+				}
-+			}
-+
-+			$client_awareness = array(
-+				'client_id' => $client_id,
-+				'state'     => $state,
-+				'user_id'   => $user_id,
-+				'timestamp' => $now_timestamp,
-+			);
-+
-+			$awareness[] = $client_awareness;
-+
-+			// Sort awareness entries by client_id.
-+			$awareness = wp_list_sort( $awareness, 'client_id' );
-+			wp_cache_set( $cache_key, $awareness, 'collaboration', HOUR_IN_SECONDS );
-+
-+			return true;
-+		}
-+
 +		$data = wp_json_encode( $state );
++		$now  = gmdate( 'Y-m-d H:i:s' );
 +
-+		/*
-+		 * Check if a row already exists.
-+		 *
-+		 * In the event of a race condition, the latest row will be returned as the update target.
-+		 */
-+		$exists = $wpdb->get_row(
-+			$wpdb->prepare(
-+				"SELECT id, date_gmt, data FROM {$wpdb->collaboration} WHERE room = %s AND type = 'awareness' AND client_id = %s  ORDER BY id DESC LIMIT 1",
-+				$room,
-+				$client_id
++		// Try UPDATE first.
++		$updated = $wpdb->update(
++			$wpdb->collaboration,
++			array(
++				'user_id'  => $user_id,
++				'data'     => $data,
++				'date_gmt' => $now,
++			),
++			array(
++				'room'      => $room,
++				'type'      => 'awareness',
++				'client_id' => $client_id,
 +			)
 +		);
 +
-+		if ( $exists && $exists->date_gmt === $now_mysql && $exists->data === $data ) {
-+			// Row already has the current date & state, consider update a success.
-+			return true;
-+		}
-+
-+		if ( $exists ) {
-+			$result = $wpdb->update(
-+				$wpdb->collaboration,
-+				array(
-+					'user_id'  => $user_id,
-+					'data'     => $data,
-+					'date_gmt' => $now_mysql,
-+				),
-+				array( 'id' => $exists->id )
-+			);
-+		} else {
++		// INSERT only if no existing row.
++		if ( 0 === (int) $updated ) {
 +			$result = $wpdb->insert(
 +				$wpdb->collaboration,
 +				array(
@@ -609,27 +511,57 @@ index 0000000000000..fe73786b7443a
 +					'client_id' => $client_id,
 +					'user_id'   => $user_id,
 +					'data'      => $data,
-+					'date_gmt'  => $now_mysql,
++					'date_gmt'  => $now,
 +				)
 +			);
-+		}
 +
-+		if ( false === $result ) {
++			if ( false === $result ) {
++				return false;
++			}
++		} elseif ( false === $updated ) {
 +			return false;
 +		}
 +
-+		// Clear in memory cache.
-+		wp_cache_delete( $cache_key, 'collaboration' );
++		// Update the cached entries in-place so the next reader in this
++		// room gets a cache hit with fresh data. If the cache is cold,
++		// skip — the next get_awareness_state() call will prime it.
++		$cache_key = 'awareness:' . $room;
++		$cached    = wp_cache_get( $cache_key, 'collaboration' );
++
++		if ( false !== $cached ) {
++			$normalized_state = json_decode( $data, true );
++			$found            = false;
++
++			foreach ( $cached as $i => $entry ) {
++				if ( $client_id === $entry['client_id'] ) {
++					$cached[ $i ]['state']   = $normalized_state;
++					$cached[ $i ]['user_id'] = $user_id;
++					$found                   = true;
++					break;
++				}
++			}
++
++			if ( ! $found ) {
++				$cached[] = array(
++					'client_id' => $client_id,
++					'state'     => $normalized_state,
++					'user_id'   => $user_id,
++				);
++			}
++
++			wp_cache_set( $cache_key, $cached, 'collaboration', 30 );
++		}
++
 +		return true;
 +	}
 +}
-diff --git a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
-similarity index 54%
-rename from src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-rename to src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
-index a90821ab78d3e..b3a7907cb021c 100644
---- a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-+++ b/src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
+diff --git a/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
+similarity index 61%
+rename from wp-includes/collaboration/class-wp-http-polling-sync-server.php
+rename to wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
+index 88554a48c7..f36d4ba1bd 100644
+--- a/wp-includes/collaboration/class-wp-http-polling-sync-server.php
++++ b/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
 @@ -1,8 +1,9 @@
  <?php
  /**
@@ -662,30 +594,12 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	const COMPACTION_THRESHOLD = 50;
  
  	/**
--	 * Maximum total size (in bytes) of the request body.
-+	 * Maximum allowed request body size in bytes.
- 	 *
- 	 * @since 7.0.0
- 	 * @var int
-@@ -54,7 +55,7 @@ class WP_HTTP_Polling_Sync_Server {
- 	const MAX_ROOMS_PER_REQUEST = 50;
- 
- 	/**
--	 * Maximum length of a single update data string.
-+	 * Maximum allowed size for a single update's data field in bytes.
- 	 *
- 	 * @since 7.0.0
- 	 * @var int
-@@ -62,7 +63,7 @@ class WP_HTTP_Polling_Sync_Server {
- 	const MAX_UPDATE_DATA_SIZE = MB_IN_BYTES;
- 
- 	/**
 -	 * Sync update type: compaction.
 +	 * Collaboration update type: compaction.
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -70,7 +71,7 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -46,7 +47,7 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_COMPACTION = 'compaction';
  
  	/**
@@ -694,7 +608,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -78,7 +79,7 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -54,7 +55,7 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_SYNC_STEP1 = 'sync_step1';
  
  	/**
@@ -703,7 +617,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -86,7 +87,7 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -62,7 +63,7 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_SYNC_STEP2 = 'sync_step2';
  
  	/**
@@ -712,7 +626,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 * @var string
-@@ -94,20 +95,21 @@ class WP_HTTP_Polling_Sync_Server {
+@@ -70,20 +71,21 @@ class WP_HTTP_Polling_Sync_Server {
  	const UPDATE_TYPE_UPDATE = 'update';
  
  	/**
@@ -738,22 +652,25 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$this->storage = $storage;
  	}
  
-@@ -149,15 +151,26 @@ public function register_routes(): void {
- 				'required' => true,
+@@ -96,8 +98,9 @@ class WP_HTTP_Polling_Sync_Server {
+ 		$typed_update_args = array(
+ 			'properties' => array(
+ 				'data' => array(
+-					'type'     => 'string',
+-					'required' => true,
++					'type'      => 'string',
++					'required'  => true,
++					'maxLength' => 1048576, // 1 MB — generous ceiling for base64-encoded Yjs updates.
+ 				),
+ 				'type' => array(
+ 					'type'     => 'string',
+@@ -125,14 +128,17 @@ class WP_HTTP_Polling_Sync_Server {
  				'type'     => array( 'object', 'null' ),
  			),
-+			/*
-+			 * client_id accepts both string and integer values:
-+			 *  - 'minimum' bounds the integer form.
-+			 *  - 'minLength' / 'maxLength' bound the string form.
-+			 */
  			'client_id' => array(
 -				'minimum'  => 1,
 -				'required' => true,
 -				'type'     => 'integer',
-+				'minimum'           => 1,
-+				'minLength'         => 1,
-+				'maxLength'         => 32, // Matches the client_id column width in wp-admin/includes/schema.php.
 +				'required'          => true,
 +				'type'              => array( 'string', 'integer' ),
 +				'sanitize_callback' => function ( $value ) {
@@ -771,7 +688,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			),
  			'updates'   => array(
  				'items'    => $typed_update_args,
-@@ -167,32 +180,53 @@ public function register_routes(): void {
+@@ -142,30 +148,51 @@ class WP_HTTP_Polling_Sync_Server {
  			),
  		);
  
@@ -779,14 +696,12 @@ index a90821ab78d3e..b3a7907cb021c 100644
 +			'methods'             => array( WP_REST_Server::CREATABLE ),
 +			'callback'            => array( $this, 'handle_request' ),
 +			'permission_callback' => array( $this, 'check_permissions' ),
-+			'validate_callback'   => array( $this, 'validate_request' ),
 +			'args'                => array(
 +				'rooms' => array(
 +					'items'    => array(
 +						'properties' => $room_args,
 +						'type'       => 'object',
 +					),
-+					'maxItems' => self::MAX_ROOMS_PER_REQUEST,
 +					'required' => true,
 +					'type'     => 'array',
 +				),
@@ -800,14 +715,12 @@ index a90821ab78d3e..b3a7907cb021c 100644
 -				'methods'             => array( WP_REST_Server::CREATABLE ),
 -				'callback'            => array( $this, 'handle_request' ),
 -				'permission_callback' => array( $this, 'check_permissions' ),
--				'validate_callback'   => array( $this, 'validate_request' ),
 -				'args'                => array(
 -					'rooms' => array(
 -						'items'    => array(
 -							'properties' => $room_args,
 -							'type'       => 'object',
 -						),
--						'maxItems' => self::MAX_ROOMS_PER_REQUEST,
 -						'required' => true,
 -						'type'     => 'array',
 -					),
@@ -842,7 +755,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 * @since 7.0.0
  	 *
  	 * @param WP_REST_Request $request The REST request.
-@@ -203,29 +237,15 @@ public function check_permissions( WP_REST_Request $request ) {
+@@ -176,29 +203,15 @@ class WP_HTTP_Polling_Sync_Server {
  		if ( ! current_user_can( 'edit_posts' ) ) {
  			return new WP_Error(
  				'rest_cannot_edit',
@@ -875,7 +788,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  
  			$type_parts   = explode( '/', $room, 2 );
  			$object_parts = explode( ':', $type_parts[1] ?? '', 2 );
-@@ -234,13 +254,13 @@ public function check_permissions( WP_REST_Request $request ) {
+@@ -207,13 +220,13 @@ class WP_HTTP_Polling_Sync_Server {
  			$entity_name = $object_parts[0];
  			$object_id   = $object_parts[1] ?? null;
  
@@ -893,35 +806,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  					),
  					array( 'status' => rest_authorization_required_code() )
  				);
-@@ -251,31 +271,29 @@ public function check_permissions( WP_REST_Request $request ) {
- 	}
- 
- 	/**
--	 * Validates that the request body does not exceed the maximum allowed size.
-+	 * Validates the incoming REST request.
- 	 *
--	 * Runs as the route-level validate_callback, after per-arg schema
--	 * validation has already passed.
-+	 * Checks that the raw request body does not exceed the maximum allowed size.
- 	 *
- 	 * @since 7.0.0
- 	 *
- 	 * @param WP_REST_Request $request The REST request.
--	 * @return true|WP_Error True if valid, WP_Error if the body is too large.
-+	 * @return true|WP_Error True if valid, WP_Error if body is too large.
- 	 */
- 	public function validate_request( WP_REST_Request $request ) {
- 		$body = $request->get_body();
- 		if ( is_string( $body ) && strlen( $body ) > self::MAX_BODY_SIZE ) {
- 			return new WP_Error(
--				'rest_sync_body_too_large',
-+				'rest_collaboration_body_too_large',
- 				__( 'Request body is too large.' ),
- 				array( 'status' => 413 )
- 			);
- 		}
--
- 		return true;
+@@ -224,7 +237,7 @@ class WP_HTTP_Polling_Sync_Server {
  	}
  
  	/**
@@ -930,7 +815,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 * updates the client is missing.
  	 *
  	 * @since 7.0.0
-@@ -295,18 +313,22 @@ public function handle_request( WP_REST_Request $request ) {
+@@ -244,18 +257,22 @@ class WP_HTTP_Polling_Sync_Server {
  			$cursor    = $room_request['after'];
  			$room      = $room_request['room'];
  
@@ -946,7 +831,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			$is_compactor = false;
  			if ( count( $merged_awareness ) > 0 ) {
 -				$is_compactor = min( array_keys( $merged_awareness ) ) === $client_id;
-+				$is_compactor = (string) min( array_keys( $merged_awareness ) ) === (string) $client_id;
++				$is_compactor = (string) min( array_keys( $merged_awareness ) ) === $client_id;
  			}
  
  			// Process each update according to its type.
@@ -956,7 +841,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  				if ( is_wp_error( $result ) ) {
  					return $result;
  				}
-@@ -323,57 +345,46 @@ public function handle_request( WP_REST_Request $request ) {
+@@ -272,7 +289,7 @@ class WP_HTTP_Polling_Sync_Server {
  	}
  
  	/**
@@ -965,95 +850,25 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * @since 7.0.0
  	 *
- 	 * @param string      $entity_kind The entity kind, e.g. 'postType', 'taxonomy', 'root'.
- 	 * @param string      $entity_name The entity name, e.g. 'post', 'category', 'site'.
--	 * @param string|null $object_id   The numeric object ID / entity key for single entities, null for collections.
-+	 * @param string|null $object_id   The object ID / entity key for single entities, null for collections.
+@@ -281,7 +298,7 @@ class WP_HTTP_Polling_Sync_Server {
+ 	 * @param string|null $object_id   The object ID / entity key for single entities, null for collections.
  	 * @return bool True if user has permission, otherwise false.
  	 */
 -	private function can_user_sync_entity_type( string $entity_kind, string $entity_name, ?string $object_id ): bool {
--		if ( is_string( $object_id ) ) {
--			if ( ! ctype_digit( $object_id ) ) {
--				return false;
--			}
--			$object_id = (int) $object_id;
--		}
--		if ( null !== $object_id && $object_id <= 0 ) {
--			// Object ID must be numeric if provided.
 +	private function can_user_collaborate_on_entity_type( string $entity_kind, string $entity_name, ?string $object_id ): bool {
-+		// Reject non-numeric object IDs early.
-+		if ( ! is_null( $object_id ) && ! is_numeric( $object_id ) ) {
- 			return false;
- 		}
- 
--		// Validate permissions for the provided object ID.
--		if ( is_int( $object_id ) ) {
--			// Handle single post type entities with a defined object ID.
--			if ( 'postType' === $entity_kind ) {
--				if ( get_post_type( $object_id ) !== $entity_name ) {
--					// Post is not of the specified post type.
--					return false;
--				}
--				return current_user_can( 'edit_post', $object_id );
-+		// Handle single post type entities with a defined object ID.
-+		if ( 'postType' === $entity_kind && is_numeric( $object_id ) ) {
-+			if ( get_post_type( $object_id ) !== $entity_name ) {
-+				return false;
- 			}
-+			return current_user_can( 'edit_post', (int) $object_id );
-+		}
- 
--			// Handle single taxonomy term entities with a defined object ID.
--			if ( 'taxonomy' === $entity_kind ) {
--				$term_exists = term_exists( $object_id, $entity_name );
--				if ( ! is_array( $term_exists ) || ! isset( $term_exists['term_id'] ) ) {
--					// Either term doesn't exist OR term is not in specified taxonomy.
--					return false;
--				}
--
--				return current_user_can( 'edit_term', $object_id );
-+		// Handle single taxonomy term entities with a defined object ID.
-+		if ( 'taxonomy' === $entity_kind && is_numeric( $object_id ) ) {
-+			if ( ! term_exists( (int) $object_id, $entity_name ) ) {
-+				return false;
- 			}
-+			return current_user_can( 'assign_term', (int) $object_id );
-+		}
- 
--			// Handle single comment entities with a defined object ID.
--			if ( 'root' === $entity_kind && 'comment' === $entity_name ) {
--				return current_user_can( 'edit_comment', $object_id );
--			}
-+		// Handle single comment entities with a defined object ID.
-+		if ( 'root' === $entity_kind && 'comment' === $entity_name && is_numeric( $object_id ) ) {
-+			return current_user_can( 'edit_comment', (int) $object_id );
- 		}
- 
--		// All the remaining checks are for collections. If an object ID is provided,
--		// reject the request.
-+		/*
-+		 * All the remaining checks are for collections. If an object ID is
-+		 * provided, reject the request.
-+		 */
- 		if ( null !== $object_id ) {
- 			return false;
- 		}
-@@ -388,9 +399,11 @@ private function can_user_sync_entity_type( string $entity_kind, string $entity_
+ 		// Handle single post type entities with a defined object ID.
+ 		if ( 'postType' === $entity_kind && is_numeric( $object_id ) ) {
+ 			return current_user_can( 'edit_post', (int) $object_id );
+@@ -314,7 +331,7 @@ class WP_HTTP_Polling_Sync_Server {
  			return current_user_can( $post_type_object->cap->edit_posts );
  		}
  
 -		// Collection syncing does not exchange entity data. It only signals if
--		// another user has updated an entity in the collection. Therefore, we only
--		// compare against an allow list of collection types.
-+		/*
-+		 * Collection collaboration does not exchange entity data. It only
-+		 * signals if another user has updated an entity in the collection.
-+		 * Therefore, we only compare against an allow list of collection types.
-+		 */
++		// Collection collaboration does not exchange entity data. It only signals if
+ 		// another user has updated an entity in the collection. Therefore, we only
+ 		// compare against an allow list of collection types.
  		$allowed_collection_entity_kinds = array(
- 			'postType',
- 			'root',
-@@ -403,66 +416,68 @@ private function can_user_sync_entity_type( string $entity_kind, string $entity_
+@@ -329,66 +346,66 @@ class WP_HTTP_Polling_Sync_Server {
  	/**
  	 * Processes and stores an awareness update from a client.
  	 *
@@ -1123,12 +938,10 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			$response[ $entry['client_id'] ] = $entry['state'];
  		}
  
-+		/*
-+		 * Other clients' states were decoded from the DB. Run the current
-+		 * client's state through the same encode/decode path so the response
-+		 * is consistent — wp_json_encode may normalize values (e.g. strip
-+		 * invalid UTF-8) that would otherwise differ on the next poll.
-+		 */
++		// Other clients' states were decoded from the DB. Run the current
++		// client's state through the same encode/decode path so the response
++		// is consistent — wp_json_encode may normalize values (e.g. strip
++		// invalid UTF-8) that would otherwise differ on the next poll.
 +		if ( null !== $awareness_update ) {
 +			$response[ $client_id ] = json_decode( wp_json_encode( $awareness_update ), true );
 +		}
@@ -1155,7 +968,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$data = $update['data'];
  		$type = $update['type'];
  
-@@ -471,7 +486,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -397,7 +414,7 @@ class WP_HTTP_Polling_Sync_Server {
  				/*
  				 * Compaction replaces updates the client has already seen. Only remove
  				 * updates with markers before the client's cursor to preserve updates
@@ -1164,25 +977,22 @@ index a90821ab78d3e..b3a7907cb021c 100644
  				 *
  				 * Check for a newer compaction update first. If one exists, skip this
  				 * compaction to avoid overwriting it.
-@@ -487,19 +502,39 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -413,15 +430,31 @@ class WP_HTTP_Polling_Sync_Server {
  				}
  
  				if ( ! $has_newer_compaction ) {
--					if ( ! $this->storage->remove_updates_before_cursor( $room, $cursor ) ) {
-+					/*
-+					 * Insert the compaction row before deleting old rows.
-+					 * Reversing the order closes a race window where a
-+					 * client joining with cursor=0 between the DELETE and
-+					 * INSERT would see an empty room for one poll cycle.
-+					 * The compaction row always has a higher ID than the
-+					 * deleted rows, so cursor-based filtering is unaffected.
-+					 */
++					// Insert the compaction row before deleting old rows.
++					// Reversing the order closes a race window where a
++					// client joining with cursor=0 between the DELETE and
++					// INSERT would see an empty room for one poll cycle.
++					// The compaction row always has a higher ID than the
++					// deleted rows, so cursor-based filtering is unaffected.
 +					$insert_result = $this->add_update( $room, $client_id, $type, $data );
 +					if ( is_wp_error( $insert_result ) ) {
 +						return $insert_result;
 +					}
 +
-+					if ( ! $this->storage->remove_updates_through_cursor( $room, $cursor ) ) {
+ 					if ( ! $this->storage->remove_updates_before_cursor( $room, $cursor ) ) {
 +						global $wpdb;
 +						$error_data = array( 'status' => 500 );
 +						if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
@@ -1201,16 +1011,8 @@ index a90821ab78d3e..b3a7907cb021c 100644
 +					return true;
  				}
  
--				// Reaching this point means there's a newer compaction, so we can
--				// silently ignore this one.
-+				/*
-+				 * Reaching this point means there's a newer compaction,
-+				 * so we can silently ignore this one.
-+				 */
- 				return true;
- 
- 			case self::UPDATE_TYPE_SYNC_STEP1:
-@@ -519,7 +554,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+ 				// Reaching this point means there's a newer compaction, so we can
+@@ -445,7 +478,7 @@ class WP_HTTP_Polling_Sync_Server {
  
  		return new WP_Error(
  			'rest_invalid_update_type',
@@ -1219,7 +1021,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			array( 'status' => 400 )
  		);
  	}
-@@ -530,12 +565,12 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -456,12 +489,12 @@ class WP_HTTP_Polling_Sync_Server {
  	 * @since 7.0.0
  	 *
  	 * @param string $room      Room identifier.
@@ -1234,7 +1036,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$update = array(
  			'client_id' => $client_id,
  			'data'      => $data,
-@@ -543,10 +578,15 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -469,10 +502,15 @@ class WP_HTTP_Polling_Sync_Server {
  		);
  
  		if ( ! $this->storage->add_update( $room, $update ) ) {
@@ -1253,7 +1055,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			);
  		}
  
-@@ -554,7 +594,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -480,7 +518,7 @@ class WP_HTTP_Polling_Sync_Server {
  	}
  
  	/**
@@ -1262,7 +1064,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * Delegates cursor-based retrieval to the storage layer, then applies
  	 * client-specific filtering and compaction logic.
-@@ -562,7 +602,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -488,7 +526,7 @@ class WP_HTTP_Polling_Sync_Server {
  	 * @since 7.0.0
  	 *
  	 * @param string $room         Room identifier.
@@ -1271,7 +1073,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 * @param int    $cursor       Return updates after this cursor.
  	 * @param bool   $is_compactor True if this client is nominated to perform compaction.
  	 * @return array{
-@@ -573,7 +613,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -499,7 +537,7 @@ class WP_HTTP_Polling_Sync_Server {
  	 *   updates: array<int, array{data: string, type: string}>,
  	 * } Response data for this room.
  	 */
@@ -1280,10 +1082,10 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$updates_after_cursor = $this->storage->get_updates_after_cursor( $room, $cursor );
  		$total_updates        = $this->storage->get_update_count( $room );
  
-diff --git a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+diff --git a/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
 deleted file mode 100644
-index 658a9b65539dd..0000000000000
---- a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
+index 658a9b6553..0000000000
+--- a/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
 +++ /dev/null
 @@ -1,378 +0,0 @@
 -<?php
@@ -1664,10 +1466,10 @@ index 658a9b65539dd..0000000000000
 -		return true;
 -	}
 -}
-diff --git a/src/wp-includes/collaboration/interface-wp-sync-storage.php b/src/wp-includes/collaboration/interface-wp-sync-storage.php
+diff --git a/wp-includes/collaboration/interface-wp-sync-storage.php b/wp-includes/collaboration/interface-wp-sync-storage.php
 deleted file mode 100644
-index d84dbeb1e4aae..0000000000000
---- a/src/wp-includes/collaboration/interface-wp-sync-storage.php
+index d84dbeb1e4..0000000000
+--- a/wp-includes/collaboration/interface-wp-sync-storage.php
 +++ /dev/null
 @@ -1,86 +0,0 @@
 -<?php
@@ -1756,11 +1558,11 @@ index d84dbeb1e4aae..0000000000000
 -	 */
 -	public function set_awareness_state( string $room, array $awareness ): bool;
 -}
-diff --git a/src/wp-includes/default-filters.php b/src/wp-includes/default-filters.php
-index 4b6d9de25fa11..17c1695e6d72d 100644
---- a/src/wp-includes/default-filters.php
-+++ b/src/wp-includes/default-filters.php
-@@ -454,6 +454,7 @@
+diff --git a/wp-includes/default-filters.php b/wp-includes/default-filters.php
+index 4b6d9de25f..17c1695e6d 100644
+--- a/wp-includes/default-filters.php
++++ b/wp-includes/default-filters.php
+@@ -454,6 +454,7 @@ add_action( 'wp_scheduled_auto_draft_delete', 'wp_delete_auto_drafts' );
  add_action( 'importer_scheduled_cleanup', 'wp_delete_attachment' );
  add_action( 'upgrader_scheduled_cleanup', 'wp_delete_attachment' );
  add_action( 'delete_expired_transients', 'delete_expired_transients' );
@@ -1768,10 +1570,10 @@ index 4b6d9de25fa11..17c1695e6d72d 100644
  
  // Navigation menu actions.
  add_action( 'delete_post', '_wp_delete_post_menu_item' );
-diff --git a/src/wp-includes/post.php b/src/wp-includes/post.php
-index b225d35c48b2a..938a6efb6ae3b 100644
---- a/src/wp-includes/post.php
-+++ b/src/wp-includes/post.php
+diff --git a/wp-includes/post.php b/wp-includes/post.php
+index 215fa153f7..a51bf46e28 100644
+--- a/wp-includes/post.php
++++ b/wp-includes/post.php
 @@ -657,42 +657,6 @@ function create_initial_post_types() {
  		)
  	);
@@ -1815,10 +1617,10 @@ index b225d35c48b2a..938a6efb6ae3b 100644
  	register_post_status(
  		'publish',
  		array(
-diff --git a/src/wp-includes/rest-api.php b/src/wp-includes/rest-api.php
-index c524f9e22a12f..688b236556fdf 100644
---- a/src/wp-includes/rest-api.php
-+++ b/src/wp-includes/rest-api.php
+diff --git a/wp-includes/rest-api.php b/wp-includes/rest-api.php
+index c524f9e22a..688b236556 100644
+--- a/wp-includes/rest-api.php
++++ b/wp-includes/rest-api.php
 @@ -431,9 +431,9 @@ function create_initial_rest_routes() {
  
  	// Collaboration.
@@ -1832,24 +1634,32 @@ index c524f9e22a12f..688b236556fdf 100644
  	}
  }
  
-diff --git a/src/wp-includes/version.php b/src/wp-includes/version.php
-index 934e5d0bb5369..59b4142166a96 100644
---- a/src/wp-includes/version.php
-+++ b/src/wp-includes/version.php
-@@ -23,7 +23,7 @@
+diff --git a/wp-includes/version.php b/wp-includes/version.php
+index 79f3d74a37..662d50a3a1 100644
+--- a/wp-includes/version.php
++++ b/wp-includes/version.php
+@@ -16,14 +16,14 @@
+  *
+  * @global string $wp_version
+  */
+-$wp_version = '7.0-RC2-62242';
++$wp_version = '7.0-RC2-20260424.011843';
+ 
+ /**
+  * Holds the WordPress DB revision, increments when changes are made to the WordPress DB schema.
   *
   * @global int $wp_db_version
   */
 -$wp_db_version = 61833;
-+$wp_db_version = 61842;
-
++$wp_db_version = 61841;
+ 
  /**
   * Holds the TinyMCE version.
-diff --git a/src/wp-settings.php b/src/wp-settings.php
-index dab1d8fd4c0de..f7e09e2c10ea4 100644
---- a/src/wp-settings.php
-+++ b/src/wp-settings.php
-@@ -310,9 +310,8 @@
+diff --git a/wp-settings.php b/wp-settings.php
+index dab1d8fd4c..f7e09e2c10 100644
+--- a/wp-settings.php
++++ b/wp-settings.php
+@@ -310,9 +310,8 @@ require ABSPATH . WPINC . '/abilities-api/class-wp-ability.php';
  require ABSPATH . WPINC . '/abilities-api/class-wp-abilities-registry.php';
  require ABSPATH . WPINC . '/abilities-api.php';
  require ABSPATH . WPINC . '/abilities.php';
