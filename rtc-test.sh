@@ -107,6 +107,7 @@ N_CLIENTS="${N_CLIENTS:-3}"
 DURATION="${DURATION:-30}"      # Seconds to run for sustain command
 UPDATE_SIZE="${UPDATE_SIZE:-small}"
 APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
+REPORTER_URL="${REPORTER_URL:-https://make.wordpress.org/hosting}"
 
 # -------------------------------------------------------------------------
 # Deterministic test constants
@@ -1635,10 +1636,10 @@ cmd_submit_results() {
 	print_header "submit-results"
 	require_auth
 
-	local reporter_url="${REPORTER_URL:-}"
+	local reporter_url="${REPORTER_URL}"
 	local api_key="${REPORTER_API_KEY:-}"
-	if [ -z "${reporter_url}" ] || [ -z "${api_key}" ]; then
-		printf 'REPORTER_URL and REPORTER_API_KEY must be set to submit results.\n'
+	if [ -z "${api_key}" ]; then
+		printf 'REPORTER_API_KEY must be set to submit results.\n'
 		printf 'Skipping submission.\n'
 		return 0
 	fi
