@@ -10,6 +10,7 @@ is the RC2 baseline and requires no patch.
 | 2 | `02-custom-table.patch` | Custom table for all data | [#11256](https://github.com/WordPress/wordpress-develop/pull/11256) | Yes — adds `wp_collaboration` |
 | 3 | `03-post-meta-transients.patch` | Post meta + transients for awareness | [#11348](https://github.com/WordPress/wordpress-develop/pull/11348) | No |
 | 4 | `04-custom-table-with-transients.patch` | Custom table + object cache for awareness | [#11599](https://github.com/WordPress/wordpress-develop/pull/11599) | Yes — adds `wp_collaboration` |
+| 5 | `05-custom-tables-with-presence.patch` | Custom table + dedicated presence table | [#11609](https://github.com/WordPress/wordpress-develop/pull/11609) | Yes — adds `wp_collaboration` + `wp_presence` |
 
 ## How patches were generated
 
@@ -39,6 +40,9 @@ patch -R -p1 < /path/to/patches/02-custom-table.patch
 
 # If the patch added the wp_collaboration table, drop it after reversing:
 wp db query "DROP TABLE IF EXISTS $(wp db prefix)collaboration;"
+
+# If the patch also added the wp_presence table (approach 5):
+wp db query "DROP TABLE IF EXISTS $(wp db prefix)presence;"
 ```
 
 ## Regenerating patches
