@@ -62,7 +62,9 @@ You can then edit the `.env` file using the editor of your choice to adjust the 
 bash run.sh
 ```
 
-This will set up the environment,run the tests, and attempt to submit the results back to the site configured in the `REPORTER_URL`. 
+This will set up the environment, run the tests, and attempt to submit the results back to the site configured in the `REPORTER_URL`.
+
+`run.sh` walks a matrix of **`POLL_DELAY`** × **`UPDATE_SIZE`** values per storage approach. In `.env`, set each as a **comma-separated** list (defaults if omitted: `0,1` and `small,medium,large`). Example: `POLL_DELAY=1` runs only delay `1`; `POLL_DELAY=0,1` runs both. A single `bash rtc-test.sh …` command always uses the **first** list entry if you keep commas in `.env`.
 
 ---
 
