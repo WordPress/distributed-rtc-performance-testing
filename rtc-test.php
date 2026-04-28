@@ -810,7 +810,8 @@ function rtctest_rest_report_all( WP_REST_Request $request ) {
 
 	$out = '';
 	foreach ( $agg as $approach => $scenarios ) {
-		$out .= sprintf( "\n── Approach: %s ──\n", $approach );
+		// ASCII separators only: JSON encoders escape U+2500 as \u2500, which looks broken in clients.
+		$out .= sprintf( "\n--- Approach: %s ---\n", $approach );
 		$out .= sprintf( $fmt_h, 'Scenario', 'dly', 'sz', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'conc' );
 		$out .= $sep_h;
 
