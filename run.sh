@@ -108,6 +108,8 @@ unset _pre_pin_poll _pre_poll _pre_pin_sz _pre_sz
 # (Avoids stale WP_NONCE inherited from the parent process after setup rewrites the file.)
 unset WP_NONCE WP_COOKIE_JAR 2>/dev/null || true
 
+SECONDS=0
+
 # ── One-time setup ────────────────────────────────────────────────────────────
 # Installs the MU-plugin, creates the rtctest user and test post, verifies the
 # required WordPress version, and writes credentials to .env.
@@ -153,3 +155,5 @@ bash "${RTC}" reset-approach
 # ── Results ───────────────────────────────────────────────────────────────────
 bash "${RTC}" report-all
 bash "${RTC}" submit-results
+
+printf '\nTotal wall time: %s\n' "$(_run_sh_format_elapsed "${SECONDS}")"
