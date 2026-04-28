@@ -997,8 +997,33 @@ cmd_baseline() {
 		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 	printf 'mean: total_ms=%s server_ms=%s\n' "$((total_ms / POLLS))" "$((total_srv / POLLS))"
-	printf '\nNote: baseline requests are NOT tagged with X-RTC-Test.\n'
-	printf 'Run "bash rtc-test.sh report" to see baseline overhead vs RTC scenarios.\n'
+
+	# Also poll the RTC endpoint so baseline latency is captured in the log table.
+	# Always tagged with approach=baseline regardless of $APPROACH, so all runs
+	# across all approaches accumulate into a single results['baseline']['baseline']
+	# bucket with N*approaches entries.
+	require_auth
+	printf '\nLogging %d RTC baseline polls (approach=baseline)...\n' "${POLLS}"
+	local rtc_baseline_opts=(
+		--silent --show-error
+		-b "${WP_COOKIE_JAR}"
+		-H "X-WP-Nonce: ${WP_NONCE}"
+		-H "X-RTC-Test: 1"
+		-H "Content-Type: application/json"
+		-H "X-RTC-Approach: baseline"
+		-H "X-RTC-Scenario: baseline"
+	)
+	local room body rtc_url
+	room=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "0" "")
+	body=$(build_rooms_json "${room}")
+	rtc_url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=baseline&_rtcapproach=baseline&_wpnonce=${WP_NONCE}"
+	i=1
+	while [ "${i}" -le "${POLLS}" ]; do
+		curl "${rtc_baseline_opts[@]}" -X POST "${rtc_url}" -d "${body}" -o /dev/null
+		printf 'poll %2d logged\n' "${i}"
+		i=$((i + 1))
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
+	done
 }
 
 cmd_single_idle() {
