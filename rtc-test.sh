@@ -1892,48 +1892,9 @@ cmd_capture_sanitize() {
 	local fixture_file="${1:-}"
 	[ -z "${fixture_file}" ] && die "Usage: bash rtc-test.sh capture-sanitize <fixture.json>"
 	[ -f "${fixture_file}" ] || die "File not found: ${fixture_file}"
-	command -v python3 >/dev/null 2>&1 || die "capture-sanitize requires python3"
+	command -v php >/dev/null 2>&1 || die "capture-sanitize requires php"
 
-	python3 -c '
-import json, sys
-
-with open(sys.argv[1]) as f:
-    data = json.load(f)
-
-frames_in  = data.get("frames", [])
-frames_out = []
-for frame in frames_in:
-    rooms = frame.get("request", {}).get("rooms", [])
-    post_room = None
-    for r in rooms:
-        if r.get("room", "").startswith("postType/post:"):
-            post_room = r
-            break
-    if post_room is None:
-        continue
-    frames_out.append({
-        "n":          frame.get("n", len(frames_out) + 1),
-        "elapsed_ms": frame.get("elapsed_ms", 0),
-        "client_id":  frame.get("client_id", 0),
-        "request": {
-            "rooms": [{
-                "room":      "postType/post:0",
-                "client_id": post_room.get("client_id", frame.get("client_id", 0)),
-                "awareness": {},
-                "after":     0,
-                "updates":   post_room.get("updates", [])
-            }]
-        }
-    })
-
-out = {
-    "session_id":  data.get("session_id", ""),
-    "frame_count": len(frames_out),
-    "frames":      frames_out,
-}
-json.dump(out, sys.stdout, separators=(",", ":"))
-sys.stdout.write("\n")
-' "${fixture_file}"
+	php "${SCRIPT_DIR}/rtc-helpers.php" capture-sanitize "${fixture_file}"
 }
 
 # replay FIXTURE_FILE -- replay a captured session JSON against the current RTC endpoint.
@@ -1950,38 +1911,12 @@ cmd_replay() {
 	local fixture_file="${1:-}"
 	[ -z "${fixture_file}" ] && die "Usage: bash rtc-test.sh replay <fixture.json>"
 	[ -f "${fixture_file}" ] || die "File not found: ${fixture_file}"
-	command -v python3 >/dev/null 2>&1 || die "replay requires python3 to parse fixture JSON"
+	command -v php >/dev/null 2>&1 || die "replay requires php to parse fixture JSON"
 
 	local speed="${REPLAY_SPEED:-1}"
 	print_header "replay ($(basename "${fixture_file}"), speed=${speed}x)"
 	require_auth
 
-	# Extract per-frame update payloads from the fixture using python3 -c (no temp file).
-	# Output format (one line per frame): elapsed_ms <TAB> client_id <TAB> updates_json
-	# updates_json is comma-separated {type,data} objects; empty string if no updates.
-	# Only the postType/post:* room is extracted; other rooms (root/comment etc.) skipped.
-	# sys.stdout.flush() after each line prevents Python pipe-buffering from stalling bash.
-	local _py_extractor
-	_py_extractor='
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        data = json.load(f)
-except Exception as e:
-    sys.stderr.write("replay: " + str(e) + "\n")
-    sys.exit(1)
-for frame in data.get("frames", []):
-    elapsed_ms = int(frame.get("elapsed_ms", 0))
-    client_id  = frame.get("client_id", 0)
-    rooms      = frame.get("request", {}).get("rooms", [])
-    for r in rooms:
-        if r.get("room", "").startswith("postType/post:"):
-            updates     = r.get("updates", [])
-            updates_str = ",".join(json.dumps(u, separators=(",",":")) for u in updates)
-            sys.stdout.write("{}\t{}\t{}\n".format(elapsed_ms, client_id, updates_str))
-            sys.stdout.flush()
-            break
-'
 
 	local cursor=0
 	local prev_elapsed=0
@@ -2029,7 +1964,7 @@ for frame in data.get("frames", []):
 			"${frame_num}" "${frame_elapsed}" "${ui_count}" "${uo_count}" \
 			"${cursor}" "${total_updates:-0}" "${compact:-false}"
 
-	done < <(python3 -c "${_py_extractor}" "${fixture_file}")
+	done < <(php "${SCRIPT_DIR}/rtc-helpers.php" replay-extract "${fixture_file}")
 
 	if [ "${frame_num}" -eq 0 ]; then
 		printf 'ERROR: no frames extracted. Check fixture format (expected capture-export JSON).\n' >&2
