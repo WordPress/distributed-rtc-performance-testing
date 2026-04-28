@@ -140,6 +140,22 @@ UPDATE_SIZE="${UPDATE_SIZE:-small}"
 APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
 REPORTER_URL="${REPORTER_URL:-https://make.wordpress.org/hosting}"
 
+# run.sh may set comma-separated lists in .env; a single rtc-test.sh command uses the first value only.
+case "${POLL_DELAY}" in
+	*,*)
+		POLL_DELAY="${POLL_DELAY%%,*}"
+		POLL_DELAY="${POLL_DELAY//[[:space:]]/}"
+		printf 'NOTICE: POLL_DELAY is a list; using first value for this command: %s\n' "${POLL_DELAY}" >&2
+		;;
+esac
+case "${UPDATE_SIZE}" in
+	*,*)
+		UPDATE_SIZE="${UPDATE_SIZE%%,*}"
+		UPDATE_SIZE="${UPDATE_SIZE//[[:space:]]/}"
+		printf 'NOTICE: UPDATE_SIZE is a list; using first value for this command: %s\n' "${UPDATE_SIZE}" >&2
+		;;
+esac
+
 POLL_DELAY="$(rtc_require_poll_delay "${POLL_DELAY}")"
 UPDATE_SIZE="$(rtc_require_update_size "${UPDATE_SIZE}")"
 
@@ -2129,10 +2145,10 @@ case "${COMMAND}" in
 		printf '  REQUIRED_WP_VERSION    WordPress version to enforce (default: %s)\n' "${REQUIRED_WP_VERSION}"
 		printf '  POST_ID       Post ID with edit permission (default: 1)\n'
 		printf '  POLLS         Polls per scenario (default: 10)\n'
-		printf '  POLL_DELAY    Seconds between polls per client (default: 1; 0=stress/immediate re-poll); sent as X-RTC-Poll-Delay / _rtcpolldelay for logging\n'
+		printf '  POLL_DELAY    Seconds between polls (default: 1; 0=stress). run.sh: comma list, default 0,1. rtc-test.sh: first entry if list.\n'
 		printf '  N_CLIENTS     Clients for n-idle/concurrent/sustain (default: 3)\n'
 		printf '  DURATION      Seconds to run for sustain (default: 30)\n'
-		printf '  UPDATE_SIZE   small|medium|large payload (default: small); sent as X-RTC-Update-Size / _rtcupdatesize for logging\n'
+		printf '  UPDATE_SIZE   small|medium|large (default: small). run.sh: comma list, default small,medium,large. rtc-test.sh: first if list.\n'
 		printf '  APPROACH              Storage approach label written to the log (e.g. post-meta, custom-table)\n'
 		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
 		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'

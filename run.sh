@@ -7,11 +7,9 @@
 # must be set in .env before running.
 #
 # Parameter matrix (per approach, after apply-approach):
-#   Default: POLL_DELAY in {0,1} and UPDATE_SIZE in {small, medium, large} (6 combos).
-#   Pinning: if POLL_DELAY and/or UPDATE_SIZE are already set in the environment
-#   before this script runs, only that value is used for that axis (same rule as rtc-test.sh).
-#   Override lists: RTC_MATRIX_POLL_DELAYS="0 1" and/or RTC_MATRIX_UPDATE_SIZES="small large"
-#   (space-separated). Used only for an axis that is not pinned.
+#   POLL_DELAY and UPDATE_SIZE are comma-separated lists (defaults: 0,1 and small,medium,large).
+#   If either variable is exported in the environment before this script runs, that value wins
+#   over .env for that axis (same snapshot rule as rtc-test.sh).
 #
 # Usage:
 #   bash run.sh
@@ -20,30 +18,45 @@ set -euo pipefail
 
 die() { printf 'ERROR: run.sh: %s\n' "$1" >&2; exit 1; }
 
-# Validate space-separated matrix tokens (same rules as rtc-test.sh) before any curl runs.
-_matrix_validate_poll_delays() {
+# Validate whitespace-separated poll-delay tokens (digits only, <=86400; same rules as rtc-test.sh).
+_run_sh_validate_poll_delay_list() {
 	local t out=""
 	for t in $1; do
 		case "${t}" in
-			''|*[!0-9]*) die "invalid POLL_DELAY matrix token: ${t}" ;;
+			''|*[!0-9]*) die "invalid POLL_DELAY list token: ${t}" ;;
 		esac
-		[ "${t}" -le 86400 ] 2>/dev/null || die "invalid POLL_DELAY matrix token (max 86400): ${t}"
+		[ "${t}" -le 86400 ] 2>/dev/null || die "invalid POLL_DELAY list token (max 86400): ${t}"
 		out="${out}${out:+ }${t}"
 	done
-	[ -n "${out}" ] || die "POLL_DELAY matrix resolved to an empty list"
+	[ -n "${out}" ] || die "POLL_DELAY list resolved to empty"
 	printf '%s' "${out}"
 }
 
-_matrix_validate_update_sizes() {
+_run_sh_validate_update_size_list() {
 	local t out=""
 	for t in $1; do
 		case "${t}" in
 			small|medium|large) out="${out}${out:+ }${t}" ;;
-			*) die "invalid UPDATE_SIZE matrix token: ${t}" ;;
+			*) die "invalid UPDATE_SIZE list token: ${t}" ;;
 		esac
 	done
-	[ -n "${out}" ] || die "UPDATE_SIZE matrix resolved to an empty list"
+	[ -n "${out}" ] || die "UPDATE_SIZE list resolved to empty"
 	printf '%s' "${out}"
+}
+
+# _run_sh_format_elapsed SECONDS -- human-readable duration for stdout summary
+_run_sh_format_elapsed() {
+	local sec="${1:-0}" h m s
+	h=$(( sec / 3600 ))
+	m=$(( (sec % 3600) / 60 ))
+	s=$(( sec % 60 ))
+	if [ "${h}" -gt 0 ]; then
+		printf '%dh %dm %ds' "${h}" "${m}" "${s}"
+	elif [ "${m}" -gt 0 ]; then
+		printf '%dm %ds' "${m}" "${s}"
+	else
+		printf '%ds' "${s}"
+	fi
 }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -67,24 +80,27 @@ fi
 [ "${_pre_pin_poll}" = 1 ] && POLL_DELAY="${_pre_poll}"
 [ "${_pre_pin_sz}" = 1 ] && UPDATE_SIZE="${_pre_sz}"
 
+# Comma-separated lists; commas -> spaces for iteration. Defaults when unset/empty after .env.
+_poll_raw=""
 if [ "${_pre_pin_poll}" = 1 ]; then
-	RTC_POLL_DELAYS="${POLL_DELAY}"
-elif [ -n "${RTC_MATRIX_POLL_DELAYS:-}" ]; then
-	RTC_POLL_DELAYS="${RTC_MATRIX_POLL_DELAYS}"
+	_poll_raw="${POLL_DELAY}"
+elif [ -n "${POLL_DELAY:-}" ]; then
+	_poll_raw="${POLL_DELAY}"
 else
-	RTC_POLL_DELAYS="0 1"
+	_poll_raw="0,1"
 fi
 
+_sz_raw=""
 if [ "${_pre_pin_sz}" = 1 ]; then
-	RTC_UPDATE_SIZES="${UPDATE_SIZE}"
-elif [ -n "${RTC_MATRIX_UPDATE_SIZES:-}" ]; then
-	RTC_UPDATE_SIZES="${RTC_MATRIX_UPDATE_SIZES}"
+	_sz_raw="${UPDATE_SIZE}"
+elif [ -n "${UPDATE_SIZE:-}" ]; then
+	_sz_raw="${UPDATE_SIZE}"
 else
-	RTC_UPDATE_SIZES="small medium large"
+	_sz_raw="small,medium,large"
 fi
 
-RTC_POLL_DELAYS="$(_matrix_validate_poll_delays "${RTC_POLL_DELAYS}")"
-RTC_UPDATE_SIZES="$(_matrix_validate_update_sizes "${RTC_UPDATE_SIZES}")"
+RTC_POLL_DELAYS="$(_run_sh_validate_poll_delay_list "${_poll_raw//,/ }")"
+RTC_UPDATE_SIZES="$(_run_sh_validate_update_size_list "${_sz_raw//,/ }")"
 
 unset _pre_pin_poll _pre_poll _pre_pin_sz _pre_sz
 
