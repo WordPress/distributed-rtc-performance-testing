@@ -1,3 +1,4 @@
 .env
 simulated-test-with-php-data-collection/rtc-test-cookies.txt
 simulated-test-with-php-data-collection/rtc-test.env
+/rtc-test-cookies.txt

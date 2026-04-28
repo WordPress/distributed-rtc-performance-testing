@@ -107,6 +107,7 @@ N_CLIENTS="${N_CLIENTS:-3}"
 DURATION="${DURATION:-30}"      # Seconds to run for sustain command
 UPDATE_SIZE="${UPDATE_SIZE:-small}"
 APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
+REPORTER_URL="${REPORTER_URL:-https://make.wordpress.org/hosting}"
 
 # -------------------------------------------------------------------------
 # Deterministic test constants
@@ -813,8 +814,12 @@ setup_wpcli() {
 		printf 'RTC:            could not update option -- verify in Settings > Writing\n'
 	fi
 
+	# Check if SAVEQUERIES is already defined and enabled in wp-config.php.
+	savequeries_value=$(wp "${WP_FLAGS[@]}" config get SAVEQUERIES 2>/dev/null)
+	if [ "$savequeries_value" = "true" ] || [ "$savequeries_value" = "1" ]; then
+		printf 'SAVEQUERIES:    already enabled in wp-config.php\n'
 	# Enable SAVEQUERIES so the plugin can record per-request DB time.
-	if wp "${WP_FLAGS[@]}" config set SAVEQUERIES true --raw >/dev/null 2>&1; then
+	elif wp "${WP_FLAGS[@]}" config set SAVEQUERIES true --raw >/dev/null 2>&1; then
 		printf 'SAVEQUERIES:    enabled in wp-config.php\n'
 	else
 		die "Could not set SAVEQUERIES in wp-config.php. Ensure the file is writable and re-run setup."
@@ -1001,8 +1006,33 @@ cmd_baseline() {
 		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
 	done
 	printf 'mean: total_ms=%s server_ms=%s\n' "$((total_ms / POLLS))" "$((total_srv / POLLS))"
-	printf '\nNote: baseline requests are NOT tagged with X-RTC-Test.\n'
-	printf 'Run "bash rtc-test.sh report" to see baseline overhead vs RTC scenarios.\n'
+
+	# Also poll the RTC endpoint so baseline latency is captured in the log table.
+	# Always tagged with approach=baseline regardless of $APPROACH, so all runs
+	# across all approaches accumulate into a single results['baseline']['baseline']
+	# bucket with N*approaches entries.
+	require_auth
+	printf '\nLogging %d RTC baseline polls (approach=baseline)...\n' "${POLLS}"
+	local rtc_baseline_opts=(
+		--silent --show-error
+		-b "${WP_COOKIE_JAR}"
+		-H "X-WP-Nonce: ${WP_NONCE}"
+		-H "X-RTC-Test: 1"
+		-H "Content-Type: application/json"
+		-H "X-RTC-Approach: baseline"
+		-H "X-RTC-Scenario: baseline"
+	)
+	local room body rtc_url
+	room=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "0" "")
+	body=$(build_rooms_json "${room}")
+	rtc_url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=baseline&_rtcapproach=baseline&_wpnonce=${WP_NONCE}"
+	i=1
+	while [ "${i}" -le "${POLLS}" ]; do
+		curl "${rtc_baseline_opts[@]}" -X POST "${rtc_url}" -d "${body}" -o /dev/null
+		printf 'poll %2d logged\n' "${i}"
+		i=$((i + 1))
+		if [ "${i}" -le "${POLLS}" ]; then sleep "${POLL_DELAY}"; fi
+	done
 }
 
 cmd_single_idle() {
@@ -1640,10 +1670,10 @@ cmd_submit_results() {
 	print_header "submit-results"
 	require_auth
 
-	local reporter_url="${REPORTER_URL:-}"
+	local reporter_url="${REPORTER_URL}"
 	local api_key="${REPORTER_API_KEY:-}"
-	if [ -z "${reporter_url}" ] || [ -z "${api_key}" ]; then
-		printf 'REPORTER_URL and REPORTER_API_KEY must be set to submit results.\n'
+	if [ -z "${api_key}" ]; then
+		printf 'REPORTER_API_KEY must be set to submit results.\n'
 		printf 'Skipping submission.\n'
 		return 0
 	fi

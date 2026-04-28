@@ -735,7 +735,7 @@ function rtctest_get_env() {
 	$env = array(
 		'php_version'          => PHP_VERSION,
 		'wp_version'           => get_bloginfo( 'version' ),
-		'db_version'           => $wpdb->db_version(),
+		'mysql_version'        => $wpdb->db_version(),
 		'ext_object_cache'     => wp_using_ext_object_cache(),
 		'object_cache_type'    => rtctest_detect_object_cache_type(),
 		'savequeries'          => defined( 'SAVEQUERIES' ) && SAVEQUERIES,
