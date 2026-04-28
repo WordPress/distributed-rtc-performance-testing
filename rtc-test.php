@@ -30,10 +30,12 @@ unset( $_rtctest_ru );
 
 define( 'RTC_TEST_ENV_OPTION',        'rtc_test_env' );
 define( 'RTC_TEST_CONCURRENT_OPTION', 'rtc_test_concurrent' );
-define( 'RTC_TEST_DB_VERSION',        '3' );
+define( 'RTC_TEST_DB_VERSION',        '4' );
 define( 'RTC_TEST_REQUEST_HEADER',    'HTTP_X_RTC_TEST' );
 define( 'RTC_TEST_SCENARIO_HEADER',   'HTTP_X_RTC_SCENARIO' );
 define( 'RTC_TEST_APPROACH_HEADER',   'HTTP_X_RTC_APPROACH' );
+define( 'RTC_TEST_POLL_DELAY_HEADER', 'HTTP_X_RTC_POLL_DELAY' );
+define( 'RTC_TEST_UPDATE_SIZE_HEADER', 'HTTP_X_RTC_UPDATE_SIZE' );
 
 // -------------------------------------------------------------------------
 // Monitor: table helpers
@@ -49,11 +51,11 @@ function rtctest_ensure_table() {
 	$table = rtctest_log_table();
 
 	// Fast path: version option matches AND the table physically exists with the
-	// correct schema.  We spot-check the 'approach' column (added in version 3)
-	// to catch tables left behind by an older version of this plugin.
+	// correct schema.  We spot-check columns added after the initial schema.
 	if ( get_option( 'rtctest_db_version' ) === RTC_TEST_DB_VERSION ) {
-		$col = $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'approach'" ); // phpcs:ignore
-		if ( null !== $col ) {
+		$col_approach = $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'approach'" ); // phpcs:ignore
+		$col_delay    = $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'poll_delay'" ); // phpcs:ignore
+		if ( null !== $col_approach && null !== $col_delay ) {
 			return; // Table exists and has the current schema.
 		}
 	}
@@ -77,6 +79,8 @@ function rtctest_ensure_table() {
 			ts int(11) NOT NULL DEFAULT 0,
 			approach varchar(60) NOT NULL DEFAULT '',
 			scenario varchar(100) NOT NULL DEFAULT 'unknown',
+			poll_delay smallint NOT NULL DEFAULT -1,
+			update_size varchar(20) NOT NULL DEFAULT '',
 			ms float NOT NULL DEFAULT 0,
 			total_ms float NOT NULL DEFAULT 0,
 			cpu_ms float NOT NULL DEFAULT 0,
@@ -96,12 +100,13 @@ function rtctest_ensure_table() {
 			concurrent int(11) NOT NULL DEFAULT 0,
 			PRIMARY KEY (id),
 			KEY approach_scenario (approach, scenario),
+			KEY approach_scenario_dims (approach, scenario, poll_delay, update_size),
 			KEY ts (ts)
 		) {$charset_collate}"
 	);
 
 	// Only mark the version current if the table was actually created.
-	if ( null !== $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'approach'" ) ) { // phpcs:ignore
+	if ( null !== $wpdb->get_var( "SHOW COLUMNS FROM `{$table}` LIKE 'poll_delay'" ) ) { // phpcs:ignore
 		update_option( 'rtctest_db_version', RTC_TEST_DB_VERSION, true );
 	} else {
 		error_log( '[rtctest] Failed to create table ' . $table . ': ' . $wpdb->last_error );
@@ -116,6 +121,52 @@ function rtctest_drop_table() {
 }
 
 rtctest_ensure_table();
+
+/**
+ * Poll delay from X-RTC-Poll-Delay or _rtcpolldelay. -1 = not provided.
+ *
+ * @param WP_REST_Request $request Request being handled.
+ * @return int Seconds between polls (as labeled by the client), or -1 if unknown.
+ */
+function rtctest_request_poll_delay_value( WP_REST_Request $request ) {
+	$raw = '';
+	if ( isset( $_SERVER[ RTC_TEST_POLL_DELAY_HEADER ] ) ) {
+		$raw = sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_POLL_DELAY_HEADER ] ) );
+	} elseif ( null !== $request->get_param( '_rtcpolldelay' ) ) {
+		$raw = sanitize_text_field( (string) $request->get_param( '_rtcpolldelay' ) );
+	}
+	if ( '' === $raw ) {
+		return -1;
+	}
+	if ( is_numeric( $raw ) ) {
+		$v = (int) $raw;
+
+		return max( -1, min( 86400, $v ) );
+	}
+
+	return -1;
+}
+
+/**
+ * Update size label from X-RTC-Update-Size or _rtcupdatesize. Empty = not provided / N/A.
+ *
+ * @param WP_REST_Request $request Request being handled.
+ * @return string One of small|medium|large or ''.
+ */
+function rtctest_request_update_size_value( WP_REST_Request $request ) {
+	$raw = '';
+	if ( isset( $_SERVER[ RTC_TEST_UPDATE_SIZE_HEADER ] ) ) {
+		$raw = sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_UPDATE_SIZE_HEADER ] ) );
+	} elseif ( null !== $request->get_param( '_rtcupdatesize' ) ) {
+		$raw = sanitize_text_field( (string) $request->get_param( '_rtcupdatesize' ) );
+	}
+	$s = strtolower( $raw );
+	if ( in_array( $s, array( 'small', 'medium', 'large' ), true ) ) {
+		return $s;
+	}
+
+	return '';
+}
 
 // -------------------------------------------------------------------------
 // Monitor: request lifecycle hooks
@@ -191,6 +242,9 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 		? sanitize_text_field( wp_unslash( $_SERVER[ RTC_TEST_APPROACH_HEADER ] ) )
 		: sanitize_text_field( (string) ( $request->get_param( '_rtcapproach' ) ?? '' ) );
 
+	$poll_delay  = rtctest_request_poll_delay_value( $request );
+	$update_size = rtctest_request_update_size_value( $request );
+
 	$data      = $response->get_data();
 	$rooms_in  = $request->get_param( 'rooms' ) ?? array();
 	$rooms_out = isset( $data['rooms'] ) && is_array( $data['rooms'] ) ? $data['rooms'] : array();
@@ -220,6 +274,8 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 		'ts'              => time(),
 		'approach'        => $approach,
 		'scenario'        => $scenario,
+		'poll_delay'      => $poll_delay,
+		'update_size'     => $update_size,
 		'ms'              => $wall_ms,
 		'total_ms'        => $total_ms,
 		'cpu_ms'          => $cpu_ms,
@@ -239,7 +295,7 @@ function rtctest_post_dispatch( $response, $server, $request ) {
 		'concurrent'      => $GLOBALS['rtctest_concurrent_at_start'],
 	);
 	$row_fmt = array(
-		'%d', '%s', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
+		'%d', '%s', '%s', '%d', '%s', '%f', '%f', '%f', '%f', '%d', '%f',
 		'%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d', '%d',
 	);
 
@@ -375,6 +431,8 @@ function rtctest_register_routes() {
 						$row['should_compact']  = (bool) $row['should_compact'];
 						$row['total_updates']   = (int) $row['total_updates'];
 						$row['concurrent']      = (int) $row['concurrent'];
+						$row['poll_delay']      = isset( $row['poll_delay'] ) ? (int) $row['poll_delay'] : -1;
+						$row['update_size']     = isset( $row['update_size'] ) ? (string) $row['update_size'] : '';
 					}
 					unset( $row );
 					return rest_ensure_response( $rows );
@@ -424,6 +482,16 @@ function rtctest_register_routes() {
 			'methods'             => WP_REST_Server::READABLE,
 			'callback'            => 'rtctest_rest_report',
 			'permission_callback' => $cap_check,
+			'args'                => array(
+				'poll_delay'  => array(
+					'required' => false,
+					'type'     => 'integer',
+				),
+				'update_size' => array(
+					'required' => false,
+					'type'     => 'string',
+				),
+			),
 		)
 	);
 
@@ -434,6 +502,16 @@ function rtctest_register_routes() {
 			'methods'             => WP_REST_Server::READABLE,
 			'callback'            => 'rtctest_rest_report_all',
 			'permission_callback' => $cap_check,
+			'args'                => array(
+				'poll_delay'  => array(
+					'required' => false,
+					'type'     => 'integer',
+				),
+				'update_size' => array(
+					'required' => false,
+					'type'     => 'string',
+				),
+			),
 		)
 	);
 
@@ -471,31 +549,67 @@ function rtctest_register_routes() {
 // -------------------------------------------------------------------------
 
 /**
- * Aggregate log rows by scenario and return a pre-formatted table as {"text":"..."}.
- * Columns: scenario, n, mean disp_ms, mean total_ms, mean cpu_ms, mean tot_cpu_ms,
- *          stddev disp_ms, mean db_queries, mean db_time_ms, mean mem_mb,
- *          updates_in sum, updates_out sum, should_compact sum, max concurrent.
+ * Load log rows for aggregate reports.
+ *
+ * @param WP_REST_Request|null $request Optional REST request with poll_delay / update_size filters.
+ * @param bool                 $with_approach When true, include approach column (report-all / submit).
+ * @return array<int, array<string, mixed>>
  */
-function rtctest_rest_report() {
+function rtctest_report_fetch_rows( ?WP_REST_Request $request = null, $with_approach = false ) {
 	global $wpdb;
 
+	$cols = 'scenario, poll_delay, update_size, ms, total_ms, cpu_ms, total_cpu_ms, db_queries, db_time_ms,'
+		. ' peak_memory, updates_in, updates_out, should_compact, concurrent';
+	if ( $with_approach ) {
+		$cols = 'approach, ' . $cols;
+	}
+
+	$table = rtctest_log_table();
+	$sql   = 'SELECT ' . $cols . ' FROM ' . $table . ' WHERE 1=1';
+	$args  = array();
+
+	if ( $request instanceof WP_REST_Request ) {
+		if ( $request->has_param( 'poll_delay' ) ) {
+			$sql   .= ' AND poll_delay = %d';
+			$args[] = (int) $request->get_param( 'poll_delay' );
+		}
+		if ( $request->has_param( 'update_size' ) ) {
+			$sql   .= ' AND update_size = %s';
+			$args[] = sanitize_text_field( (string) $request->get_param( 'update_size' ) );
+		}
+	}
+
+	$sql .= ' ORDER BY id ASC';
+
+	if ( $args ) {
+		return $wpdb->get_results( $wpdb->prepare( $sql, $args ), ARRAY_A );
+	}
+
 	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-	$rows = $wpdb->get_results(
-		'SELECT scenario, ms, total_ms, cpu_ms, total_cpu_ms, db_queries, db_time_ms,'
-		. ' peak_memory, updates_in, updates_out, should_compact, concurrent'
-		. ' FROM ' . rtctest_log_table() . ' ORDER BY id ASC',
-		ARRAY_A
-	);
+	return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+/**
+ * Aggregate log rows by scenario × poll_delay × update_size and return {"text":"..."}.
+ *
+ * Optional query params: poll_delay (int), update_size (string) restrict rows before aggregation.
+ */
+function rtctest_rest_report( WP_REST_Request $request ) {
+	$rows = rtctest_report_fetch_rows( $request, false );
 
 	if ( empty( $rows ) ) {
 		return rest_ensure_response( array( 'text' => '' ) );
 	}
 
+	// $agg[ $scenario ][ $poll_delay ][ $update_size ] = counters…
 	$agg = array();
 	foreach ( $rows as $row ) {
-		$s = $row['scenario'];
-		if ( ! isset( $agg[ $s ] ) ) {
-			$agg[ $s ] = array(
+		$scenario = (string) $row['scenario'];
+		$pd       = isset( $row['poll_delay'] ) ? (int) $row['poll_delay'] : -1;
+		$sz       = isset( $row['update_size'] ) ? (string) $row['update_size'] : '';
+
+		if ( ! isset( $agg[ $scenario ][ $pd ][ $sz ] ) ) {
+			$agg[ $scenario ][ $pd ][ $sz ] = array(
 				'n'                  => 0,
 				'ms_sum'             => 0.0,
 				'ms_sq_sum'          => 0.0,
@@ -511,7 +625,7 @@ function rtctest_rest_report() {
 				'max_concurrent'     => 0,
 			);
 		}
-		$a  = &$agg[ $s ];
+		$a  = &$agg[ $scenario ][ $pd ][ $sz ];
 		$ms = (float) $row['ms'];
 		$a['n']++;
 		$a['ms_sum']             += $ms;
@@ -531,52 +645,95 @@ function rtctest_rest_report() {
 		unset( $a );
 	}
 
-	$fmt_h = "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n";
-	$fmt_r = "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6.1f %6d %6d %5d %5d\n";
+	$fmt_h = "%-18s %4s %-7s %6s %8s %8s %8s %11s %8s %8s %8s %6s %6s %6s %5s %5s\n";
+	$fmt_r = "%-18s %4s %-7s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6.1f %6d %6d %5d %5d\n";
 
-	$out  = sprintf( $fmt_h, 'Scenario', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'mem_mb', 'ui_tot', 'uo_tot', 'sc', 'conc' );
-	$out .= sprintf( $fmt_h, '', '', 'avg', 'avg', 'avg', 'avg', 'stddev', 'avg', 'avg', 'avg', 'sum', 'sum', 'sum', 'max' );
-	$out .= sprintf( $fmt_h,
-		str_repeat( '-', 22 ), str_repeat( '-', 6 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 11 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 6 ),
-		str_repeat( '-', 6 ),  str_repeat( '-', 6 ),
-		str_repeat( '-', 5 ),  str_repeat( '-', 5 )
+	$out  = sprintf( $fmt_h, 'Scenario', 'dly', 'sz', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'mem_mb', 'ui_tot', 'uo_tot', 'sc', 'conc' );
+	$out .= sprintf( $fmt_h, '', '', '', '', 'avg', 'avg', 'avg', 'avg', 'stddev', 'avg', 'avg', 'avg', 'sum', 'sum', 'sum', 'max' );
+	$out .= sprintf(
+		$fmt_h,
+		str_repeat( '-', 18 ),
+		str_repeat( '-', 4 ),
+		str_repeat( '-', 7 ),
+		str_repeat( '-', 6 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 11 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 6 ),
+		str_repeat( '-', 6 ),
+		str_repeat( '-', 6 ),
+		str_repeat( '-', 5 ),
+		str_repeat( '-', 5 )
 	);
 
-	$baseline_mean = 0.0;
-	foreach ( $agg as $name => $a ) {
-		$n    = $a['n'];
-		$mean = $a['ms_sum'] / $n;
-		$var  = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
-		$out .= sprintf( $fmt_r,
-			$name, $n, $mean,
-			$a['total_ms_sum'] / $n,
-			$a['cpu_ms_sum'] / $n,
-			$a['total_cpu_ms_sum'] / $n,
-			sqrt( $var ),
-			$a['db_queries_sum'] / $n,
-			$a['db_time_ms_sum'] / $n,
-			$a['peak_memory_sum'] / $n / 1048576,
-			$a['updates_in_sum'],
-			$a['updates_out_sum'],
-			$a['should_compact_sum'],
-			$a['max_concurrent']
-		);
-		if ( 'baseline' === $name ) {
-			$baseline_mean = $mean;
+	$baseline_ms_sum = 0.0;
+	$baseline_n     = 0;
+	foreach ( $agg as $scenario => $by_pd ) {
+		if ( 'baseline' !== $scenario ) {
+			continue;
+		}
+		foreach ( $by_pd as $a_by_sz ) {
+			foreach ( $a_by_sz as $a ) {
+				$baseline_ms_sum += $a['ms_sum'];
+				$baseline_n     += $a['n'];
+			}
+		}
+	}
+	$baseline_mean = $baseline_n > 0 ? $baseline_ms_sum / $baseline_n : 0.0;
+
+	foreach ( $agg as $scenario => $by_pd ) {
+		foreach ( $by_pd as $pd => $by_sz ) {
+			foreach ( $by_sz as $sz => $a ) {
+				$dly_label = ( $pd < 0 ) ? '-' : (string) $pd;
+				$sz_label  = ( '' === $sz ) ? '-' : $sz;
+				$n         = $a['n'];
+				$mean      = $a['ms_sum'] / $n;
+				$var       = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+				$scen_disp = strlen( $scenario ) > 18 ? substr( $scenario, 0, 15 ) . '...' : $scenario;
+				$out      .= sprintf(
+					$fmt_r,
+					$scen_disp,
+					$dly_label,
+					$sz_label,
+					$n,
+					$mean,
+					$a['total_ms_sum'] / $n,
+					$a['cpu_ms_sum'] / $n,
+					$a['total_cpu_ms_sum'] / $n,
+					sqrt( $var ),
+					$a['db_queries_sum'] / $n,
+					$a['db_time_ms_sum'] / $n,
+					$a['peak_memory_sum'] / $n / 1048576,
+					$a['updates_in_sum'],
+					$a['updates_out_sum'],
+					$a['should_compact_sum'],
+					$a['max_concurrent']
+				);
+			}
 		}
 	}
 
 	if ( $baseline_mean > 0.0 ) {
 		$out .= sprintf( "\nRatio to baseline (disp_ms / baseline_disp_ms = %.1f):\n", $baseline_mean );
-		foreach ( $agg as $name => $a ) {
-			if ( 'baseline' === $name ) {
+		foreach ( $agg as $scenario => $by_pd ) {
+			if ( 'baseline' === $scenario ) {
 				continue;
 			}
-			$out .= sprintf( "  %-22s %.2fx\n", $name, ( $a['ms_sum'] / $a['n'] ) / $baseline_mean );
+			foreach ( $by_pd as $pd => $by_sz ) {
+				foreach ( $by_sz as $sz => $a ) {
+					$n    = $a['n'];
+					$mean = $a['ms_sum'] / $n;
+					$lbl  = $scenario;
+					if ( $pd >= 0 || '' !== $sz ) {
+						$lbl .= sprintf( ' [%s,%s]', ( $pd < 0 ) ? '-' : (string) $pd, '' === $sz ? '-' : $sz );
+					}
+					$out .= sprintf( "  %-40s %.2fx\n", $lbl, $mean / $baseline_mean );
+				}
+			}
 		}
 	}
 
@@ -584,19 +741,12 @@ function rtctest_rest_report() {
 }
 
 /**
- * Aggregate log rows by approach × scenario and return a pre-formatted table
- * per approach as {"text":"..."}.
+ * Aggregate log rows by approach × scenario × poll_delay × update_size.
+ *
+ * Optional query params: poll_delay, update_size filter rows before aggregation.
  */
-function rtctest_rest_report_all() {
-	global $wpdb;
-
-	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-	$rows = $wpdb->get_results(
-		'SELECT approach, scenario, ms, total_ms, cpu_ms, total_cpu_ms,'
-		. ' db_queries, db_time_ms, peak_memory, concurrent'
-		. ' FROM ' . rtctest_log_table() . ' ORDER BY id ASC',
-		ARRAY_A
-	);
+function rtctest_rest_report_all( WP_REST_Request $request ) {
+	$rows = rtctest_report_fetch_rows( $request, true );
 
 	if ( empty( $rows ) ) {
 		return rest_ensure_response( array( 'text' => '' ) );
@@ -605,9 +755,12 @@ function rtctest_rest_report_all() {
 	$agg = array();
 	foreach ( $rows as $row ) {
 		$approach = '' !== $row['approach'] ? $row['approach'] : '(untagged)';
-		$scenario = $row['scenario'];
-		if ( ! isset( $agg[ $approach ][ $scenario ] ) ) {
-			$agg[ $approach ][ $scenario ] = array(
+		$scenario = (string) $row['scenario'];
+		$pd       = isset( $row['poll_delay'] ) ? (int) $row['poll_delay'] : -1;
+		$sz       = isset( $row['update_size'] ) ? (string) $row['update_size'] : '';
+
+		if ( ! isset( $agg[ $approach ][ $scenario ][ $pd ][ $sz ] ) ) {
+			$agg[ $approach ][ $scenario ][ $pd ][ $sz ] = array(
 				'n'                => 0,
 				'ms_sum'           => 0.0,
 				'ms_sq_sum'        => 0.0,
@@ -620,7 +773,7 @@ function rtctest_rest_report_all() {
 				'max_concurrent'   => 0,
 			);
 		}
-		$a  = &$agg[ $approach ][ $scenario ];
+		$a  = &$agg[ $approach ][ $scenario ][ $pd ][ $sz ];
 		$ms = (float) $row['ms'];
 		$a['n']++;
 		$a['ms_sum']           += $ms;
@@ -637,51 +790,86 @@ function rtctest_rest_report_all() {
 		unset( $a );
 	}
 
-	$fmt_h = "%-22s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n";
-	$fmt_r = "%-22s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6d\n";
-	$sep_h = sprintf( $fmt_h,
-		str_repeat( '-', 22 ), str_repeat( '-', 6 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 11 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 8 ),
-		str_repeat( '-', 8 ),  str_repeat( '-', 6 )
+	$fmt_h = "%-18s %4s %-7s %6s %8s %8s %8s %11s %8s %8s %8s %6s\n";
+	$fmt_r = "%-18s %4s %-7s %6d %8.1f %8.1f %8.1f %11.1f %8.1f %8.1f %8.1f %6d\n";
+	$sep_h = sprintf(
+		$fmt_h,
+		str_repeat( '-', 18 ),
+		str_repeat( '-', 4 ),
+		str_repeat( '-', 7 ),
+		str_repeat( '-', 6 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 11 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 8 ),
+		str_repeat( '-', 6 )
 	);
 
 	$out = '';
 	foreach ( $agg as $approach => $scenarios ) {
 		$out .= sprintf( "\n── Approach: %s ──\n", $approach );
-		$out .= sprintf( $fmt_h, 'Scenario', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'conc' );
+		$out .= sprintf( $fmt_h, 'Scenario', 'dly', 'sz', 'n', 'disp_ms', 'total_ms', 'cpu_ms', 'tot_cpu_ms', 'sd_disp', 'db_q', 'db_t_ms', 'conc' );
 		$out .= $sep_h;
 
-		$baseline_mean = 0.0;
+		$baseline_ms_sum = 0.0;
+		$baseline_n       = 0;
 		if ( isset( $scenarios['baseline'] ) ) {
-			$b             = $scenarios['baseline'];
-			$baseline_mean = $b['ms_sum'] / $b['n'];
+			foreach ( $scenarios['baseline'] as $a_by_sz ) {
+				foreach ( $a_by_sz as $b ) {
+					$baseline_ms_sum += $b['ms_sum'];
+					$baseline_n     += $b['n'];
+				}
+			}
 		}
+		$baseline_mean = $baseline_n > 0 ? $baseline_ms_sum / $baseline_n : 0.0;
 
-		foreach ( $scenarios as $name => $a ) {
-			$n    = $a['n'];
-			$mean = $a['ms_sum'] / $n;
-			$var  = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
-			$out .= sprintf( $fmt_r,
-				$name, $n, $mean,
-				$a['total_ms_sum'] / $n,
-				$a['cpu_ms_sum'] / $n,
-				$a['total_cpu_ms_sum'] / $n,
-				sqrt( $var ),
-				$a['db_queries_sum'] / $n,
-				$a['db_time_ms_sum'] / $n,
-				$a['max_concurrent']
-			);
+		foreach ( $scenarios as $scenario => $by_pd ) {
+			foreach ( $by_pd as $pd => $by_sz ) {
+				foreach ( $by_sz as $sz => $a ) {
+					$dly_label = ( $pd < 0 ) ? '-' : (string) $pd;
+					$sz_label  = ( '' === $sz ) ? '-' : $sz;
+					$n         = $a['n'];
+					$mean      = $a['ms_sum'] / $n;
+					$var       = max( 0.0, ( $a['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+					$scen_disp = strlen( $scenario ) > 18 ? substr( $scenario, 0, 15 ) . '...' : $scenario;
+					$out      .= sprintf(
+						$fmt_r,
+						$scen_disp,
+						$dly_label,
+						$sz_label,
+						$n,
+						$mean,
+						$a['total_ms_sum'] / $n,
+						$a['cpu_ms_sum'] / $n,
+						$a['total_cpu_ms_sum'] / $n,
+						sqrt( $var ),
+						$a['db_queries_sum'] / $n,
+						$a['db_time_ms_sum'] / $n,
+						$a['max_concurrent']
+					);
+				}
+			}
 		}
 
 		if ( $baseline_mean > 0.0 ) {
 			$out .= "\n  Ratio to baseline (disp_ms):\n";
-			foreach ( $scenarios as $name => $a ) {
-				if ( 'baseline' === $name ) {
+			foreach ( $scenarios as $scenario => $by_pd ) {
+				if ( 'baseline' === $scenario ) {
 					continue;
 				}
-				$out .= sprintf( "    %-22s %.2fx\n", $name, ( $a['ms_sum'] / $a['n'] ) / $baseline_mean );
+				foreach ( $by_pd as $pd => $by_sz ) {
+					foreach ( $by_sz as $sz => $a ) {
+						$mean = $a['ms_sum'] / $a['n'];
+						$lbl  = $scenario;
+						if ( $pd >= 0 || '' !== $sz ) {
+							$lbl .= sprintf( ' [%s,%s]', ( $pd < 0 ) ? '-' : (string) $pd, '' === $sz ? '-' : $sz );
+						}
+						$out .= sprintf( "    %-40s %.2fx\n", $lbl, $mean / $baseline_mean );
+					}
+				}
 			}
 		}
 	}
@@ -750,8 +938,6 @@ function rtctest_get_env() {
 }
 
 function rtctest_rest_submit( WP_REST_Request $request ) {
-	global $wpdb;
-
 	$reporter_url     = $request->get_param( 'reporter_url' );
 	$api_key          = $request->get_param( 'api_key' );    // username:password format
 	$environment_name = $request->get_param( 'environment_name' ) ?: get_option( 'siteurl' );
@@ -763,25 +949,22 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 	// Build environment snapshot.
 	$env = rtctest_get_env()->get_data();
 
-	// Fetch all log rows.
-	// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-	$rows = $wpdb->get_results(
-		'SELECT approach, scenario, ms, total_ms, cpu_ms, total_cpu_ms, db_queries, db_time_ms, peak_memory, concurrent'
-		. ' FROM ' . rtctest_log_table(),
-		ARRAY_A
-	);
+	$rows = rtctest_report_fetch_rows( null, true );
 
 	if ( empty( $rows ) ) {
 		return new WP_Error( 'no_data', 'No log entries to submit.', array( 'status' => 400 ) );
 	}
 
-	// Aggregate by approach × scenario.
+	// Aggregate by approach × scenario × poll_delay × update_size.
 	$agg = array();
 	foreach ( $rows as $row ) {
 		$approach = '' !== $row['approach'] ? $row['approach'] : 'untagged';
-		$scenario = $row['scenario'];
-		if ( ! isset( $agg[ $approach ][ $scenario ] ) ) {
-			$agg[ $approach ][ $scenario ] = array(
+		$scenario = (string) $row['scenario'];
+		$pd       = isset( $row['poll_delay'] ) ? (int) $row['poll_delay'] : -1;
+		$sz       = isset( $row['update_size'] ) ? (string) $row['update_size'] : '';
+
+		if ( ! isset( $agg[ $approach ][ $scenario ][ $pd ][ $sz ] ) ) {
+			$agg[ $approach ][ $scenario ][ $pd ][ $sz ] = array(
 				'n'                => 0,
 				'ms_sum'           => 0.0,
 				'ms_sq_sum'        => 0.0,
@@ -794,7 +977,7 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 				'max_concurrent'   => 0,
 			);
 		}
-		$s  = &$agg[ $approach ][ $scenario ];
+		$s  = &$agg[ $approach ][ $scenario ][ $pd ][ $sz ];
 		$ms = (float) $row['ms'];
 		$s['n']++;
 		$s['ms_sum']           += $ms;
@@ -811,26 +994,34 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 		unset( $s );
 	}
 
-	// Build results structure.
+	// Build results: each scenario lists one stats object per (poll_delay, update_size) variant.
 	$results = array();
 	foreach ( $agg as $approach => $scenarios ) {
 		$results[ $approach ] = array();
-		foreach ( $scenarios as $scenario => $s ) {
-			$n    = $s['n'];
-			$mean = $s['ms_sum'] / $n;
-			$var  = max( 0.0, ( $s['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
-			$results[ $approach ][ $scenario ] = array(
-				'n'                 => $n,
-				'mean_disp_ms'      => round( $mean, 2 ),
-				'mean_total_ms'     => round( $s['total_ms_sum'] / $n, 2 ),
-				'mean_cpu_ms'       => round( $s['cpu_ms_sum'] / $n, 2 ),
-				'mean_total_cpu_ms' => round( $s['total_cpu_ms_sum'] / $n, 2 ),
-				'stddev_disp_ms'    => round( sqrt( $var ), 2 ),
-				'mean_db_queries'   => round( $s['db_queries_sum'] / $n, 1 ),
-				'mean_db_time_ms'   => round( $s['db_time_ms_sum'] / $n, 2 ),
-				'mean_mem_mb'       => round( $s['peak_memory_sum'] / $n / 1048576, 2 ),
-				'max_concurrent'    => $s['max_concurrent'],
-			);
+		foreach ( $scenarios as $scenario => $by_pd ) {
+			$variants = array();
+			foreach ( $by_pd as $pd => $by_sz ) {
+				foreach ( $by_sz as $sz => $s ) {
+					$n    = $s['n'];
+					$mean = $s['ms_sum'] / $n;
+					$var  = max( 0.0, ( $s['ms_sq_sum'] / $n ) - ( $mean * $mean ) );
+					$variants[] = array(
+						'poll_delay'        => $pd,
+						'update_size'       => $sz,
+						'n'                 => $n,
+						'mean_disp_ms'      => round( $mean, 2 ),
+						'mean_total_ms'     => round( $s['total_ms_sum'] / $n, 2 ),
+						'mean_cpu_ms'       => round( $s['cpu_ms_sum'] / $n, 2 ),
+						'mean_total_cpu_ms' => round( $s['total_cpu_ms_sum'] / $n, 2 ),
+						'stddev_disp_ms'    => round( sqrt( $var ), 2 ),
+						'mean_db_queries'   => round( $s['db_queries_sum'] / $n, 1 ),
+						'mean_db_time_ms'   => round( $s['db_time_ms_sum'] / $n, 2 ),
+						'mean_mem_mb'       => round( $s['peak_memory_sum'] / $n / 1048576, 2 ),
+						'max_concurrent'    => $s['max_concurrent'],
+					);
+				}
+			}
+			$results[ $approach ][ $scenario ] = array( 'variants' => $variants );
 		}
 	}
 
