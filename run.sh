@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run.sh -- Sets up the test environment, runs the full RTC performance suite
-# across all five storage approaches, prints a combined report, and submits
+# across all four storage approaches, prints a combined report, and submits
 # results to the reporter endpoint.
 #
 # Prerequisites: WP_PATH (and optionally REPORTER_URL + reporter credentials)
