@@ -71,6 +71,10 @@ if [ -f "${_env_file}" ]; then
 	_pre_reporter_url="${REPORTER_URL:-}"
 	_pre_api_key="${REPORTER_API_KEY:-}"
 	_pre_env_name="${ENVIRONMENT_NAME:-}"
+	_pre_has_poll_delay=0
+	[ "${POLL_DELAY+x}" = x ] && _pre_has_poll_delay=1 && _pre_poll_delay="${POLL_DELAY}"
+	_pre_has_update_size=0
+	[ "${UPDATE_SIZE+x}" = x ] && _pre_has_update_size=1 && _pre_update_size="${UPDATE_SIZE}"
 	# shellcheck source=/dev/null
 	. "${_env_file}"
 	[ -n "${_pre_url}"          ] && WP_URL="${_pre_url}"
@@ -84,10 +88,37 @@ if [ -f "${_env_file}" ]; then
 	[ -n "${_pre_reporter_url}" ] && REPORTER_URL="${_pre_reporter_url}"
 	[ -n "${_pre_api_key}"      ] && REPORTER_API_KEY="${_pre_api_key}"
 	[ -n "${_pre_env_name}"     ] && ENVIRONMENT_NAME="${_pre_env_name}"
+	[ "${_pre_has_poll_delay}" = 1 ] && POLL_DELAY="${_pre_poll_delay}"
+	[ "${_pre_has_update_size}" = 1 ] && UPDATE_SIZE="${_pre_update_size}"
 	unset _pre_url _pre_user _pre_pass _pre_jar _pre_nonce _pre_path _pre_post \
-	      _pre_approach _pre_reporter_url _pre_api_key _pre_env_name
+	      _pre_approach _pre_reporter_url _pre_api_key _pre_env_name \
+	      _pre_has_poll_delay _pre_poll_delay _pre_has_update_size _pre_update_size
 fi
 unset _env_file
+
+# die MESSAGE — defined before config so POLL_DELAY / UPDATE_SIZE validation can use it.
+die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
+
+# rtc_require_poll_delay VALUE -- echo decimal 0..86400 (matches server clamp) or die.
+# Rejects empty, non-numeric, newlines, and header-injection characters for safe curl -H / URLs.
+rtc_require_poll_delay() {
+	local v="$1"
+	case "${v}" in
+		''|*[!0-9]*) die "POLL_DELAY must be a non-negative integer (refusing unsafe or empty value)" ;;
+	esac
+	if [ "${v}" -gt 86400 ] 2>/dev/null; then
+		die "POLL_DELAY must be <= 86400 (got: ${v})"
+	fi
+	printf '%s' "${v}"
+}
+
+# rtc_require_update_size VALUE -- echo small|medium|large or die.
+rtc_require_update_size() {
+	case "$1" in
+		small|medium|large) printf '%s' "$1" ;;
+		*) die "UPDATE_SIZE must be small, medium, or large (refusing unsafe value)" ;;
+	esac
+}
 
 # -------------------------------------------------------------------------
 # Configuration (all overridable via environment variables or .env)
@@ -108,6 +139,25 @@ DURATION="${DURATION:-30}"      # Seconds to run for sustain command
 UPDATE_SIZE="${UPDATE_SIZE:-small}"
 APPROACH="${APPROACH:-}"        # Storage approach label (e.g. post-meta, custom-table); written to log
 REPORTER_URL="${REPORTER_URL:-https://make.wordpress.org/hosting}"
+
+# run.sh may set comma-separated lists in .env; a single rtc-test.sh command uses the first value only.
+case "${POLL_DELAY}" in
+	*,*)
+		POLL_DELAY="${POLL_DELAY%%,*}"
+		POLL_DELAY="${POLL_DELAY//[[:space:]]/}"
+		printf 'NOTICE: POLL_DELAY is a list; using first value for this command: %s\n' "${POLL_DELAY}" >&2
+		;;
+esac
+case "${UPDATE_SIZE}" in
+	*,*)
+		UPDATE_SIZE="${UPDATE_SIZE%%,*}"
+		UPDATE_SIZE="${UPDATE_SIZE//[[:space:]]/}"
+		printf 'NOTICE: UPDATE_SIZE is a list; using first value for this command: %s\n' "${UPDATE_SIZE}" >&2
+		;;
+esac
+
+POLL_DELAY="$(rtc_require_poll_delay "${POLL_DELAY}")"
+UPDATE_SIZE="$(rtc_require_update_size "${UPDATE_SIZE}")"
 
 # -------------------------------------------------------------------------
 # Deterministic test constants
@@ -160,6 +210,8 @@ BASE_CURL_OPTS=(
 	-H "X-WP-Nonce: ${WP_NONCE}"
 	-H "X-RTC-Test: 1"
 	-H "Content-Type: application/json"
+	-H "X-RTC-Poll-Delay: ${POLL_DELAY}"
+	-H "X-RTC-Update-Size: ${UPDATE_SIZE}"
 )
 [ -n "${APPROACH}" ] && BASE_CURL_OPTS+=( -H "X-RTC-Approach: ${APPROACH}" )
 
@@ -177,9 +229,6 @@ CAPTURE_SESSIONS_URL="${WP_URL}/wp-json/rtc-capture/v1/sessions"
 # -------------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------------
-
-# die MESSAGE
-die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
 
 # require_auth
 # Confirms that cookie jar and nonce are available before running a test command.
@@ -227,6 +276,7 @@ rtc_post() {
 	local body="$2"
 	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}&_wpnonce=${WP_NONCE}"
 	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
+	url="${url}&_rtcpolldelay=${POLL_DELAY}&_rtcupdatesize=${UPDATE_SIZE}"
 	curl "${BASE_CURL_OPTS[@]}" \
 		-H "X-RTC-Scenario: ${scenario}" \
 		-X POST "${url}" \
@@ -244,6 +294,7 @@ rtc_post_timed() {
 	local body="$2"
 	local url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=${scenario}&_wpnonce=${WP_NONCE}"
 	[ -n "${APPROACH}" ] && url="${url}&_rtcapproach=${APPROACH}"
+	url="${url}&_rtcpolldelay=${POLL_DELAY}&_rtcupdatesize=${UPDATE_SIZE}"
 	local timing
 	timing=$(curl "${BASE_CURL_OPTS[@]}" \
 		-H "X-RTC-Scenario: ${scenario}" \
@@ -389,6 +440,23 @@ print_header() {
 	printf '\n=== %s ===\n' "$1"
 }
 
+# print_test_run_conditions STORAGE_APPROACH
+# Summarizes parameters sent on each logged RTC request (headers / query / DB columns).
+# Call after apply-approach (or whenever you want a clear record of the active matrix).
+print_test_run_conditions() {
+	local storage="${1:-}"
+	printf '\n'
+	printf '── Test conditions (logged per request'
+	[ -n "${storage}" ] && printf '; storage approach: %s' "${storage}"
+	printf ') ──\n'
+	printf '  POLL_DELAY:    %s\n' "${POLL_DELAY}"
+	printf '  UPDATE_SIZE:   %s\n' "${UPDATE_SIZE}"
+	printf '  POLLS:         %s\n' "${POLLS}"
+	printf '  N_CLIENTS:     %s\n' "${N_CLIENTS}"
+	printf '  DURATION:      %s s\n' "${DURATION}"
+	printf '  (Sent as X-RTC-Poll-Delay / X-RTC-Update-Size and _rtcpolldelay / _rtcupdatesize.)\n'
+}
+
 # -------------------------------------------------------------------------
 # WordPress version enforcement
 # -------------------------------------------------------------------------
@@ -441,6 +509,12 @@ ensure_wp_version() {
 			"${updated}" "${REQUIRED_WP_VERSION}"
 		return 1
 	fi
+}
+
+cmd_print_test_conditions() {
+	local storage="${1:-}"
+	print_header "print-test-conditions${storage:+ (${storage})}"
+	print_test_run_conditions "${storage}"
 }
 
 cmd_ensure_wp_version() {
@@ -1012,11 +1086,14 @@ cmd_baseline() {
 		-H "Content-Type: application/json"
 		-H "X-RTC-Approach: baseline"
 		-H "X-RTC-Scenario: baseline"
+		-H "X-RTC-Poll-Delay: ${POLL_DELAY}"
+		-H "X-RTC-Update-Size: ${UPDATE_SIZE}"
 	)
 	local room body rtc_url
 	room=$(build_room_json "${CLIENT_A}" "${AWARENESS_A}" "0" "")
 	body=$(build_rooms_json "${room}")
 	rtc_url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=baseline&_rtcapproach=baseline&_wpnonce=${WP_NONCE}"
+	rtc_url="${rtc_url}&_rtcpolldelay=${POLL_DELAY}&_rtcupdatesize=${UPDATE_SIZE}"
 	i=1
 	while [ "${i}" -le "${POLLS}" ]; do
 		curl "${rtc_baseline_opts[@]}" -X POST "${rtc_url}" -d "${body}" -o /dev/null
@@ -1426,9 +1503,12 @@ cmd_concurrent() {
 			(
 				# Busy-wait until the rendezvous second.
 				while [ "$(date +%s)" -lt "${sa}" ]; do :; done
+				local _curl_url="${RTC_ENDPOINT}?_rtctest=1&_rtcscenario=concurrent&_wpnonce=${WP_NONCE}"
+				[ -n "${APPROACH}" ] && _curl_url="${_curl_url}&_rtcapproach=${APPROACH}"
+				_curl_url="${_curl_url}&_rtcpolldelay=${POLL_DELAY}&_rtcupdatesize=${UPDATE_SIZE}"
 				curl "${BASE_CURL_OPTS[@]}" \
 					-H "X-RTC-Scenario: concurrent" \
-					-X POST "${RTC_ENDPOINT}" \
+					-X POST "${_curl_url}" \
 					-d "${body}" \
 					-w '\n__HTTP_STATUS__:%{http_code}' \
 					2>/dev/null
@@ -1985,6 +2065,7 @@ case "${COMMAND}" in
 	setup)                  cmd_setup ;;
 	ensure-wp-version)      cmd_ensure_wp_version ;;
 	apply-approach)         cmd_apply_approach "${2:-}" ;;
+	print-test-conditions) cmd_print_test_conditions "${2:-}" ;;
 	reset-approach)         cmd_reset_approach ;;
 	teardown)               cmd_teardown ;;
 	refresh-auth)           cmd_refresh_auth ;;
@@ -2017,6 +2098,7 @@ case "${COMMAND}" in
 		printf '  setup                 Auto-configure via WP-CLI (or print manual instructions)\n'
 		printf '  ensure-wp-version     Verify WordPress %s is installed; update via WP-CLI if not\n' "${REQUIRED_WP_VERSION}"
 		printf '  apply-approach <name> Download nightly, apply approach patch, clear RTC data\n'
+		printf '  print-test-conditions [approach]  Print POLL_DELAY / UPDATE_SIZE / POLLS / N_CLIENTS / DURATION\n'
 		printf '  reset-approach        Download nightly and return to a clean unpatched state\n'
 		printf '  teardown              Delete test post, remove cookie jar, strip generated .env section\n'
 		printf '  refresh-auth          Re-login and refresh cookie jar + nonce (run if nonce expires)\n'
@@ -2031,7 +2113,7 @@ case "${COMMAND}" in
 		printf '  sustain               N_CLIENTS independent pollers for DURATION seconds\n'
 		printf '  env                   Print environment snapshot (PHP, WP, DB, cache, etc.)\n'
 		printf '  report                Fetch log from plugin and print summary table\n'
-		printf '  report-all            Print summary table grouped by approach × scenario\n'
+		printf '  report-all            Print summary by approach × scenario × poll_delay × update_size\n'
 		printf '  submit-results        POST all results to the reporter endpoint (requires REPORTER_* vars)\n'
 		printf '  clear                 Delete all log entries (table stays, schema intact)\n'
 		printf '  reset                 Drop the log table entirely (recreated on next tagged request)\n'
@@ -2054,10 +2136,10 @@ case "${COMMAND}" in
 		printf '  REQUIRED_WP_VERSION    WordPress version to enforce (default: %s)\n' "${REQUIRED_WP_VERSION}"
 		printf '  POST_ID       Post ID with edit permission (default: 1)\n'
 		printf '  POLLS         Polls per scenario (default: 10)\n'
-		printf '  POLL_DELAY    Seconds between polls per client (default: 1; 0=stress/immediate re-poll)\n'
+		printf '  POLL_DELAY    Seconds between polls (default: 1; 0=stress). run.sh: comma list, default 0,1. rtc-test.sh: first entry if list.\n'
 		printf '  N_CLIENTS     Clients for n-idle/concurrent/sustain (default: 3)\n'
 		printf '  DURATION      Seconds to run for sustain (default: 30)\n'
-		printf '  UPDATE_SIZE   small|medium|large payload (default: small)\n'
+		printf '  UPDATE_SIZE   small|medium|large (default: small). run.sh: comma list, default small,medium,large. rtc-test.sh: first if list.\n'
 		printf '  APPROACH              Storage approach label written to the log (e.g. post-meta, custom-table)\n'
 		printf '  REPLAY_SPEED  Replay time compression: 1=real-time 2=2x 0=instant (default: 1)\n'
 		printf '  REPLAY_CLIENT Override client_id for replay (default: use captured client_id)\n'
