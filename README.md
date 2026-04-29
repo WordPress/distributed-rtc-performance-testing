@@ -85,9 +85,9 @@ Otherwise, please follow these steps below:
 
 The test runner measures the performance of 4 different approaches to data storage for the RTC feature.
 
- # | Approach | name                                                                                               | PR                                                                  |
-|---|----------|----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
-| 1 | Post meta — RC2 baseline | `post-meta`                                                                                        | —                                                                   |
-| 2 | Custom table for all data | `custom-table`                                                                                     | [#11256](https://github.com/WordPress/wordpress-develop/pull/11256) |
-| 3 | Post meta + transients for awareness | `post-meta-transients` [#11348](https://github.com/WordPress/wordpress-develop/pull/11348)         |
-| 4 | Custom table + object cache for awareness | `custom-table-with-transients` [#11599](https://github.com/WordPress/wordpress-develop/pull/11599) |
+|  # | Approach                                  | name                           | PR                                                                   |
+|----|-------------------------------------------|--------------------------------|----------------------------------------------------------------------|
+| 1  | Post meta — RC2 baseline                  | `post-meta`                    | NA                                                                   |
+| 2  | Custom table for all data                 | `custom-table`                 | [#11256](https://github.com/WordPress/wordpress-develop/pull/11256)  |
+| 3  | Post meta + transients for awareness      | `post-meta-transients`         | [#11348](https://github.com/WordPress/wordpress-develop/pull/11348)  |
+| 4  | Custom table + object cache for awareness | `custom-table-with-transients` | [#11599](https://github.com/WordPress/wordpress-develop/pull/11599)  |
