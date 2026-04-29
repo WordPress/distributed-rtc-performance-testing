@@ -467,7 +467,6 @@ approach_patch_file() {
 		custom-table)         printf '%s' "${SCRIPT_DIR}/patches/02-custom-table.patch" ;;
 		post-meta-transients) printf '%s' "${SCRIPT_DIR}/patches/03-post-meta-transients.patch" ;;
 		custom-table-with-transients)  printf '%s' "${SCRIPT_DIR}/patches/04-custom-table-with-transients.patch" ;;
-		custom-tables-with-presence)   printf '%s' "${SCRIPT_DIR}/patches/05-custom-tables-with-presence.patch" ;;
 		*)                    printf '' ;;  # post-meta (RC2 baseline) or empty
 	esac
 }
