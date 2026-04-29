@@ -1844,6 +1844,19 @@ index c524f9e22a12f..688b236556fdf 100644
  	}
  }
  
+diff --git a/src/wp-includes/version.php b/src/wp-includes/version.php
+index 934e5d0bb5369..75b9b39fab00f 100644
+--- a/src/wp-includes/version.php
++++ b/src/wp-includes/version.php
+@@ -23,7 +23,7 @@
+  *
+  * @global int $wp_db_version
+  */
+-$wp_db_version = 61833;
++$wp_db_version = 62282;
+ 
+ /**
+  * Holds the TinyMCE version.
 diff --git a/src/wp-settings.php b/src/wp-settings.php
 index dab1d8fd4c0de..f7e09e2c10ea4 100644
 --- a/src/wp-settings.php
