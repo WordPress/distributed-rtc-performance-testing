@@ -18,7 +18,7 @@ index 82ab6b93ac99e..3634c8c29c20d 100644
  
  $date_format = __( 'F j, Y' );
 diff --git a/src/wp-admin/includes/schema.php b/src/wp-admin/includes/schema.php
-index 340bdebac71eb..1c7b40b71c498 100644
+index 340bdebac71eb..3bfcbf8ef8211 100644
 --- a/src/wp-admin/includes/schema.php
 +++ b/src/wp-admin/includes/schema.php
 @@ -186,6 +186,20 @@ function wp_get_db_schema( $scope = 'all', $blog_id = null ) {
@@ -27,16 +27,16 @@ index 340bdebac71eb..1c7b40b71c498 100644
  	KEY type_status_author (post_type,post_status,post_author)
 +) $charset_collate;
 +CREATE TABLE $wpdb->collaboration (
-+	id bigint(20) unsigned NOT NULL auto_increment,
++	collaboration_id bigint(20) unsigned NOT NULL auto_increment,
 +	room varchar($max_index_length) NOT NULL default '',
 +	type varchar(32) NOT NULL default '',
 +	client_id varchar(32) NOT NULL default '',
 +	user_id bigint(20) unsigned NOT NULL default '0',
 +	data longtext NOT NULL,
 +	date_gmt datetime NOT NULL default '0000-00-00 00:00:00',
-+	PRIMARY KEY  (id),
++	PRIMARY KEY  (collaboration_id),
 +	KEY type_client_id (type,client_id),
-+	KEY room (room,id),
++	KEY room (room,collaboration_id),
 +	KEY room_type_date (room,type,date_gmt),
 +	KEY date_gmt (date_gmt)
  ) $charset_collate;\n";
@@ -160,7 +160,7 @@ index 11698a2ac78f4..350b6cf1b21b0 100644
 +}
 diff --git a/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
 new file mode 100644
-index 0000000000000..2781af4716bf4
+index 0000000000000..de216c1aa35d8
 --- /dev/null
 +++ b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
 @@ -0,0 +1,392 @@
@@ -358,7 +358,7 @@ index 0000000000000..2781af4716bf4
 +		/* Snapshot the current max ID and total row count in a single query. */
 +		$snapshot = $wpdb->get_row(
 +			$wpdb->prepare(
-+				"SELECT COALESCE( MAX( id ), 0 ) AS max_id, COUNT(*) AS total FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness'",
++				"SELECT COALESCE( MAX( collaboration_id ), 0 ) AS max_id, COUNT(*) AS total FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness'",
 +				$room
 +			)
 +		);
@@ -389,7 +389,7 @@ index 0000000000000..2781af4716bf4
 +		/* Fetch updates after the cursor up to the snapshot boundary. */
 +		$rows = $wpdb->get_results(
 +			$wpdb->prepare(
-+				"SELECT data FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness' AND id > %d AND id <= %d ORDER BY id ASC",
++				"SELECT data FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness' AND collaboration_id > %d AND collaboration_id <= %d ORDER BY collaboration_id ASC",
 +				$room,
 +				$cursor,
 +				$max_id
@@ -429,7 +429,7 @@ index 0000000000000..2781af4716bf4
 +		// "delete all, re-add some" pattern.
 +		$result = $wpdb->query(
 +			$wpdb->prepare(
-+				"DELETE FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness' AND id <= %d",
++				"DELETE FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness' AND collaboration_id <= %d",
 +				$room,
 +				$cursor
 +			)
@@ -482,7 +482,7 @@ index 0000000000000..2781af4716bf4
 +		/* Check if a row already exists. */
 +		$exists = $wpdb->get_row(
 +			$wpdb->prepare(
-+				"SELECT id, date_gmt FROM {$wpdb->collaboration} WHERE room = %s AND type = 'awareness' AND client_id = %s LIMIT 1",
++				"SELECT collaboration_id, date_gmt, data FROM {$wpdb->collaboration} WHERE room = %s AND type = 'awareness' AND client_id = %s  ORDER BY collaboration_id DESC LIMIT 1",
 +				$room,
 +				$client_id
 +			)
@@ -501,7 +501,7 @@ index 0000000000000..2781af4716bf4
 +					'data'     => $data,
 +					'date_gmt' => $now,
 +				),
-+				array( 'id' => $exists->id )
++				array( 'collaboration_id' => $exists->collaboration_id )
 +			);
 +		} else {
 +			$result = $wpdb->insert(
@@ -1766,7 +1766,7 @@ index c524f9e22a12f..688b236556fdf 100644
  }
  
 diff --git a/src/wp-includes/version.php b/src/wp-includes/version.php
-index 934e5d0bb5369..59b4142166a96 100644
+index 934e5d0bb5369..fd9aeab4f286d 100644
 --- a/src/wp-includes/version.php
 +++ b/src/wp-includes/version.php
 @@ -23,7 +23,7 @@
@@ -1774,8 +1774,8 @@ index 934e5d0bb5369..59b4142166a96 100644
   * @global int $wp_db_version
   */
 -$wp_db_version = 61833;
-+$wp_db_version = 61842;
-
++$wp_db_version = 61844;
+ 
  /**
   * Holds the TinyMCE version.
 diff --git a/src/wp-settings.php b/src/wp-settings.php

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run.sh -- Sets up the test environment, runs the full RTC performance suite
-# across all five storage approaches, prints a combined report, and submits
+# across all four storage approaches, prints a combined report, and submits
 # results to the reporter endpoint.
 #
 # Prerequisites: WP_PATH (and optionally REPORTER_URL + reporter credentials)
@@ -127,7 +127,7 @@ bash "${RTC}" env
 # For each approach: patch WP, reset RTC state, then run baseline / single-idle /
 # sustain for every (POLL_DELAY × UPDATE_SIZE) combination.
 
-APPROACHES="post-meta custom-table post-meta-transients custom-table-with-transients custom-tables-with-presence"
+APPROACHES="post-meta custom-table post-meta-transients custom-table-with-transients"
 
 printf '\n── Matrix: POLL_DELAY ∈ {%s}, UPDATE_SIZE ∈ {%s} ──\n' \
 	"${RTC_POLL_DELAYS// /, }" "${RTC_UPDATE_SIZES// /, }"
