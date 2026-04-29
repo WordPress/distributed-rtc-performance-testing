@@ -36,7 +36,7 @@ git clone https://github.com/WordPress/distributed-rtc-performance-testing.git <
 
 ### Configure the test runner.
 
-While the runner is designed to run without any file modifications, it does require some configuration through a handful of environment variables (see [.env.example](.env.example) for an annotated overview).
+While the runner is designed to run without any file modifications, it does require some configuration through a handful of environment variables (see [.env.example](.env.example) for an annotated overview) which are documentated below.
 
 Run the following command to create an `.env` file from the example:
 
