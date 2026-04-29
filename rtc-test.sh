@@ -475,7 +475,7 @@ approach_patch_file() {
 # wp_collaboration table (requires wp core update-db and table teardown).
 approach_has_schema_change() {
 	case "$1" in
-		custom-table|custom-table-with-transients|custom-tables-with-presence) return 0 ;;
+		custom-table|custom-table-with-transients) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -511,14 +511,6 @@ _clear_rtc_data() {
 			echo "  Collaboration table truncated.\n";
 		}
 
-		// Truncate the presence table if it exists (custom-tables-with-presence approach).
-		$presence = $wpdb->prefix . "presence";
-		$exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $presence ) );
-		if ( $exists ) {
-			$wpdb->query( "TRUNCATE TABLE `{$presence}`" );
-			echo "  Presence table truncated.\n";
-		}
-
 		// Remove awareness transients (post-meta-transients approach).
 		$deleted = (int) $wpdb->query(
 			"DELETE FROM {$wpdb->options}
@@ -535,11 +527,11 @@ _clear_rtc_data() {
 cmd_apply_approach() {
 	local approach="${1:-}"
 	[ -n "${approach}" ] || die "Usage: bash rtc-test.sh apply-approach <approach>
-  Approaches: post-meta  custom-table  post-meta-transients  custom-table-with-transients  custom-tables-with-presence"
+  Approaches: post-meta  custom-table  post-meta-transients  custom-table-with-transients"
 
 	case "${approach}" in
-		post-meta|custom-table|post-meta-transients|custom-table-with-transients|custom-tables-with-presence) ;;
-		*) die "Unknown approach '${approach}'. Valid: post-meta  custom-table  post-meta-transients  custom-table-with-transients  custom-tables-with-presence" ;;
+		post-meta|custom-table|post-meta-transients|custom-table-with-transients) ;;
+		*) die "Unknown approach '${approach}'. Valid: post-meta  custom-table  post-meta-transients  custom-table-with-transients" ;;
 	esac
 
 	print_header "apply-approach (${approach})"

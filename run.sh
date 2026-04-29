@@ -31,7 +31,7 @@ bash "${RTC}" env
 # For each approach: patch WP, reset RTC state, run the scenario suite.
 # APPROACH is passed as an env var so every log entry is tagged with the name.
 
-APPROACHES="post-meta custom-table post-meta-transients custom-table-with-transients custom-tables-with-presence"
+APPROACHES="post-meta custom-table post-meta-transients custom-table-with-transients"
 
 for approach in ${APPROACHES}; do
 	bash "${RTC}" apply-approach "${approach}"
