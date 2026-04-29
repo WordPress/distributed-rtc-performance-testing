@@ -1,29 +1,30 @@
-# rtc-test
+# Distributed Real-time Collaboration Performance Tests
 
-Load-testing tool for the WordPress Real Time Collaboration HTTP polling endpoint
-(`POST /wp-sync/v1/updates`).
+This repository is a set of scripts intended to run within a hosting environment to provide performance data for the new real-time collaboration feature shipping in WordPress 7.0.
 
-Two files:
+This data will help Core contributors determine which architectural approach is the most sound and safest at scale.
 
-| File | Where it goes |
-|---|---|
-| `rtc-test.php` | `wp-content/mu-plugins/` on the test site |
-| `rtc-test.sh` | Anywhere you want to run tests from |
-
-Requirements: **bash**, **curl**. WP-CLI is used by `setup`/`teardown` if available.
-`replay` and `capture-sanitize` also require **python3**.
-
----
-
-## Host instructions
-
-If you are a hosting provider looking to run these tests to submit data back to the Core team, here are the steps you should follow:
+## Requirements
 
 The following tools are **required** to run this test script:
+
+- bash
 - cURL
-- WP-CLI
+- WP-CLI (configured to run at `wp`)
 - patch
-- openssl (optional)
+
+
+### Optional
+
+The following libraries are recommended but optional:
+
+- openssl
+
+## Setup Instructions
+
+First, of you are a hosting provider looking to run these tests, thank you!
+
+Here are the list of steps to follow:
 
 ### Clone the repository
 
@@ -35,16 +36,7 @@ git clone https://github.com/WordPress/distributed-rtc-performance-testing.git <
 
 ### Configure the test runner.
 
-While the test runner supports a number of environment variables that adjust how the tests are run, there are a few that must be configured.
-
-- `WP_PATH`: This must be set to the absolute path of root directory for the test WordPress installation.
-- `REPORTER_URL`: The URL to report results to. In most cases, this should be the default of https://make.wordpress.org/hosting. But it can be the URL of any site running the [PHPUnit Test Reporter plugin](https://github.com/wordPress/phpunit-test-reporter).
-- `REPORTER_API_KEY`: The credentials of a reporting user on the `REPORTER_URL` site in the format of `username:application-password`.
-- `ENVIRONMENT_NAME`: A descriptive label of the environment running the tests. For example, "Performance Shared" or "Managed eCommerce". This will help contributors analyzing the data understand which type of environment the data comes from.
-
-Hosts participating in the [PHPUnit Hosting Tests](https://make.wordpress.org/hosting/test-results/) can reuse the same credentials for this test runner.
-
-**Note:** if you need to be set up with a user account for submitting test results, please request one in the [#hosting](https://wordpress.slack.com/archives/C3D6T7F8Q) in Slack and ping `@desrosj` or `@amykamala`.
+While the runner is designed to run without any file modifications, it does require some configuration through a handful of environment variables (see [.env.example](.env.example) for an annotated overview) which are documentated below.
 
 Run the following command to create an `.env` file from the example:
 
@@ -54,7 +46,17 @@ cp .env.example .env
 
 You can then edit the `.env` file using the editor of your choice to adjust the configuration.
 
-**Note:** The test runner will erase the contents of the configured site. Do not configure the test runner to use a production site, or any site that cannot be wiped clean. 
+The following variables **must** be configured:
+
+- `WP_PATH`: This should be the absolute path of root directory for the test WordPress installation.
+- `ENVIRONMENT_NAME`: A descriptive label of the environment running the tests. For example, "Performance Shared" or "Managed eCommerce". This will help the Core contributors analyzing the data understand the type of hosting.
+- `REPORTER_API_KEY`: The credentials of the reporting user the format of `username:appl icat ion- pass word`.
+
+#### Notes
+- Hosts participating in the [PHPUnit Hosting Tests](https://make.wordpress.org/hosting/test-results/) can reuse the same credentials for this test runner.
+- If you do not have a test bot and need to set one up, see the [Submitting Test Results section below](#submitting-test-results).
+
+**WARNING:** The test runner will erase the contents of the configured site. Do not configure the test runner to use a production site, or any site that cannot be wiped clean.
 
 ### Run the Tests
 
@@ -62,136 +64,30 @@ You can then edit the `.env` file using the editor of your choice to adjust the 
 bash run.sh
 ```
 
-This will set up the environment, run the tests, and attempt to submit the results back to the site configured in the `REPORTER_URL`.
-
-`run.sh` walks a matrix of **`POLL_DELAY`** × **`UPDATE_SIZE`** values per storage approach. In `.env`, set each as a **comma-separated** list (defaults if omitted: `0,1` and `small,medium,large`). Example: `POLL_DELAY=1` runs only delay `1`; `POLL_DELAY=0,1` runs both. A single `bash rtc-test.sh …` command always uses the **first** list entry if you keep commas in `.env`.
+This will set up the environment, run the tests, and attempt to submit the results to WordPress.org.
 
 ---
 
-## Installation
+## Submitting Test Results
 
-Copy `rtc-test.php` into the site's `mu-plugins` directory. No activation needed.
+A WordPress.org bot account is required to submit test results.
 
-Verify it loaded:
+If you have participated in the [PHPUnit Distributed Hosting Tests](https://make.wordpress.org/hosting/test-results/) before, please reuse the same bot account and create a new application password. Here are the steps from the :
 
-```
-Tools > RTC Tests
-```
+Otherwise, please follow these steps below:
 
----
+1. Create a bot WordPress.org account. If your company is Wonderful Hosting, Inc., this bot account username might be `wonderfulbot`. Make sure to set its email address to something monitored by a human. Please add a Gravatar/logo and URL that clearly represents your company to the profile as well.
+2. [Create a new issue](https://github.com/WordPress/distributed-rtc-performance-testing/issues/new?title=Promote+%60DOTORG_BOT_NAME%60+to+Test+Reporter&body=COMPANY_NAME+would+like+to+submit+test+results+from+the+distributed+real-time+collaboration+test+suite.%0A%0A*+Username%3A+%60DOTORG_BOT_NAME%60%0A*+Email%3A+%60some-email%40kind-company.com%60) requesting the bot user be added to this WordPress.org site as a "Test Reporter"**. The email address associated with the user is required.
+3. After your bot user has been added, sign in to the Making WordPress Hosting site as the bot and visit `Users -> Your Profile` to generate an application password.
+4. Set the application password as an environment variable: export REPORTER_API_KEY='wonderfulbot:Osho NHgM xYSY UWF9 qNUn YdjV'.
 
-## Setup
+## What is measured?
 
-Run `setup` on the web host (WP-CLI creates the test user and post):
+The test runner measures the performance of 4 different approaches to data storage for the RTC feature.
 
-```bash
-bash rtc-test.sh setup
-```
-
-This writes `rtc-test.env` with the site URL, credentials, and a test post ID.
-
-**Running tests from a different host (e.g. your laptop):**
-
-```bash
-# On the web host after setup:
-cat rtc-test.env
-
-# Paste the output into rtc-test.env on your local machine, then:
-bash rtc-test.sh refresh-auth   # creates local cookie jar + fresh nonce (required after copy)
-bash rtc-test.sh baseline
-# Nonces expire after ~12h; refresh-auth renews them.
-```
-
----
-
-## Initial report
-
-```bash
-bash rtc-test.sh baseline          # ambient WP REST overhead (no RTC)
-bash rtc-test.sh single-idle       # 1 client, 10 polls, no updates
-bash rtc-test.sh sustain           # 3 clients polling for 30s (default)
-bash rtc-test.sh report            # print summary table
-```
-
-The report shows per-scenario means for `disp_ms` (endpoint wall time),
-`total_ms` (full worker occupancy), `cpu_ms`, DB queries, and max concurrency.
-
----
-
-## Common variants
-
-**More clients, longer run:**
-
-```bash
-N_CLIENTS=8 DURATION=60 bash rtc-test.sh sustain
-```
-
-**Stress mode (no delay between polls):**
-
-```bash
-N_CLIENTS=10 POLL_DELAY=0 DURATION=20 bash rtc-test.sh sustain
-```
-
-**Burst concurrency (all clients fire simultaneously):**
-
-```bash
-N_CLIENTS=8 POLLS=10 bash rtc-test.sh concurrent
-```
-
-**Compaction cycle:**
-
-```bash
-bash rtc-test.sh compaction-trigger
-```
-
-**Two clients exchanging edits (sync handshake):**
-
-```bash
-bash rtc-test.sh two-editing
-```
-
-**Clear log between runs:**
-
-```bash
-bash rtc-test.sh clear     # delete rows, keep table
-bash rtc-test.sh reset     # drop and recreate table
-```
-
----
-
-## Capturing and replaying real sessions
-
-Capture a real browser editing session as a replay fixture:
-
-```bash
-bash rtc-test.sh seed                          # populate the test post with content
-bash rtc-test.sh capture-start my-session      # start recording
-# Open the editor in a browser and edit the post
-bash rtc-test.sh capture-stop                  # stop recording
-bash rtc-test.sh capture-export my-session > captures/my-session.json
-```
-
-Sanitize the fixture for sharing (strips awareness names, cursors, response bodies):
-
-```bash
-bash rtc-test.sh capture-sanitize captures/my-session.json \
-  > captures/my-session-sanitized.json
-```
-
-Replay against the current site:
-
-```bash
-bash rtc-test.sh replay captures/my-session.json            # real-time
-REPLAY_SPEED=4 bash rtc-test.sh replay captures/my-session.json  # 4x
-REPLAY_SPEED=0 bash rtc-test.sh replay captures/my-session.json  # instant
-```
-
----
-
-## Teardown
-
-```bash
-bash rtc-test.sh teardown   # deletes test post, removes rtc-test.env and cookie jar
-```
-
-The `rtctest` user is left in place (password was randomized by setup).
+ # | Approach | name                                                                                               | PR                                                                  |
+|---|----------|----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
+| 1 | Post meta — RC2 baseline | `post-meta`                                                                                        | —                                                                   |
+| 2 | Custom table for all data | `custom-table`                                                                                     | [#11256](https://github.com/WordPress/wordpress-develop/pull/11256) |
+| 3 | Post meta + transients for awareness | `post-meta-transients` [#11348](https://github.com/WordPress/wordpress-develop/pull/11348)         |
+| 4 | Custom table + object cache for awareness | `custom-table-with-transients` [#11599](https://github.com/WordPress/wordpress-develop/pull/11599) |
