@@ -15,7 +15,7 @@ is the RC2 baseline and requires no patch.
 
 ```bash
 gh pr diff <number> --repo WordPress/wordpress-develop | \
-  awk '/^diff --git/ { skip = ($0 ~ /tests\/|version\.php/) } !skip { print }' \
+  awk '/^diff --git/ { skip = ($0 ~ /tests\//) } !skip { print }' \
   > patches/<file>.patch
 ```
 
