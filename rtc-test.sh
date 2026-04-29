@@ -599,7 +599,7 @@ cmd_apply_approach() {
 	# Step 5: Run DB upgrade again if the approach introduces a schema change (adds the
 	# wp_collaboration table).  wp_is_collaboration_enabled() requires db_version >= 61841.
 	if approach_has_schema_change "${approach}"; then
-		printf 'Running database upgrade (adds collaboration table and/or presence table)...\n'
+		printf 'Running database upgrade (adds collaboration table)...\n'
 		wp "${WP_FLAGS[@]}" core update-db || die "Database upgrade failed."
 		local db_ver
 		db_ver="$(wp "${WP_FLAGS[@]}" option get db_version 2>/dev/null)"

@@ -38,9 +38,6 @@ patch -R -p1 < /path/to/patches/02-custom-table.patch
 
 # If the patch added the wp_collaboration table, drop it after reversing:
 wp db query "DROP TABLE IF EXISTS $(wp db prefix)collaboration;"
-
-# If the patch also added the wp_presence table (approach 5):
-wp db query "DROP TABLE IF EXISTS $(wp db prefix)presence;"
 ```
 
 ## Regenerating patches
