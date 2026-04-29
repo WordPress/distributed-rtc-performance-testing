@@ -19,8 +19,7 @@ gh pr diff <number> --repo WordPress/wordpress-develop | \
   > patches/<file>.patch
 ```
 
-Test files (`tests/`) and `version.php` are excluded — they are not needed for
-performance testing and the version string must reflect the actual installed build.
+Test files (`tests/`) are excluded — they are not needed for performance testing.
 
 ## Applying a patch
 
