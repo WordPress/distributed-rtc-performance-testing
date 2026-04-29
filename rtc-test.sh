@@ -467,7 +467,6 @@ approach_patch_file() {
 		custom-table)         printf '%s' "${SCRIPT_DIR}/patches/02-custom-table.patch" ;;
 		post-meta-transients) printf '%s' "${SCRIPT_DIR}/patches/03-post-meta-transients.patch" ;;
 		custom-table-with-transients)  printf '%s' "${SCRIPT_DIR}/patches/04-custom-table-with-transients.patch" ;;
-		custom-tables-with-presence)   printf '%s' "${SCRIPT_DIR}/patches/05-custom-tables-with-presence.patch" ;;
 		*)                    printf '' ;;  # post-meta (RC2 baseline) or empty
 	esac
 }
@@ -476,7 +475,7 @@ approach_patch_file() {
 # wp_collaboration table (requires wp core update-db and table teardown).
 approach_has_schema_change() {
 	case "$1" in
-		custom-table|custom-table-with-transients|custom-tables-with-presence) return 0 ;;
+		custom-table|custom-table-with-transients) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -512,14 +511,6 @@ _clear_rtc_data() {
 			echo "  Collaboration table truncated.\n";
 		}
 
-		// Truncate the presence table if it exists (custom-tables-with-presence approach).
-		$presence = $wpdb->prefix . "presence";
-		$exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $presence ) );
-		if ( $exists ) {
-			$wpdb->query( "TRUNCATE TABLE `{$presence}`" );
-			echo "  Presence table truncated.\n";
-		}
-
 		// Remove awareness transients (post-meta-transients approach).
 		$deleted = (int) $wpdb->query(
 			"DELETE FROM {$wpdb->options}
@@ -536,11 +527,11 @@ _clear_rtc_data() {
 cmd_apply_approach() {
 	local approach="${1:-}"
 	[ -n "${approach}" ] || die "Usage: bash rtc-test.sh apply-approach <approach>
-  Approaches: post-meta  custom-table  post-meta-transients  custom-table-with-transients  custom-tables-with-presence"
+  Approaches: post-meta  custom-table  post-meta-transients  custom-table-with-transients"
 
 	case "${approach}" in
-		post-meta|custom-table|post-meta-transients|custom-table-with-transients|custom-tables-with-presence) ;;
-		*) die "Unknown approach '${approach}'. Valid: post-meta  custom-table  post-meta-transients  custom-table-with-transients  custom-tables-with-presence" ;;
+		post-meta|custom-table|post-meta-transients|custom-table-with-transients) ;;
+		*) die "Unknown approach '${approach}'. Valid: post-meta  custom-table  post-meta-transients  custom-table-with-transients" ;;
 	esac
 
 	print_header "apply-approach (${approach})"
@@ -608,7 +599,7 @@ cmd_apply_approach() {
 	# Step 5: Run DB upgrade again if the approach introduces a schema change (adds the
 	# wp_collaboration table).  wp_is_collaboration_enabled() requires db_version >= 61841.
 	if approach_has_schema_change "${approach}"; then
-		printf 'Running database upgrade (adds collaboration table and/or presence table)...\n'
+		printf 'Running database upgrade (adds collaboration table)...\n'
 		wp "${WP_FLAGS[@]}" core update-db || die "Database upgrade failed."
 		local db_ver
 		db_ver="$(wp "${WP_FLAGS[@]}" option get db_version 2>/dev/null)"
