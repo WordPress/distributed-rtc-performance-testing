@@ -819,6 +819,18 @@ setup_wpcli() {
 		printf '    cp "%s/rtc-test.php" "%s/"\n' "${SCRIPT_DIR}" "${mu_plugins_dir}"
 	fi
 
+	# Ensure pretty permalinks are enabled — the REST API requires them.
+	local perm_struct
+	perm_struct="$(wp "${WP_FLAGS[@]}" option get permalink_structure 2>/dev/null)" || perm_struct=""
+	if [ -z "${perm_struct}" ]; then
+		printf 'Permalinks:     default (query-string) -- setting to /%postname%/\n'
+		wp "${WP_FLAGS[@]}" rewrite structure '/%postname%/' --hard >/dev/null 2>&1 \
+			|| die "Could not set permalink structure. Set it manually: Settings > Permalinks."
+		printf 'Permalinks:     set to /%postname%/\n'
+	else
+		printf 'Permalinks:     %s\n' "${perm_struct}"
+	fi
+
 	# Always use the dedicated rtctest user so setup controls the password.
 	# We generate the password here and either create or reset the account.
 	local rtctest_wp_pass
@@ -880,7 +892,7 @@ setup_wpcli() {
 	fi
 
 	# Check if SAVEQUERIES is already defined and enabled in wp-config.php.
-	savequeries_value=$(wp "${WP_FLAGS[@]}" config get SAVEQUERIES 2>/dev/null)
+	savequeries_value=$(wp "${WP_FLAGS[@]}" config get SAVEQUERIES 2>/dev/null || true)
 	if [ "$savequeries_value" = "true" ] || [ "$savequeries_value" = "1" ]; then
 		printf 'SAVEQUERIES:    already enabled in wp-config.php\n'
 	# Enable SAVEQUERIES so the plugin can record per-request DB time.
@@ -943,10 +955,12 @@ setup_manual() {
 	printf 'WP-CLI not available. Manual setup steps:\n\n'
 	printf '1. Copy rtc-test.php to the site'"'"'s mu-plugins directory:\n'
 	printf '   cp rtc-test.php /path/to/wp-content/mu-plugins/\n\n'
-	printf '2. Enable RTC: WP Admin > Settings > Writing > "Enable early access to\n'
+	printf '2. Enable pretty permalinks: WP Admin > Settings > Permalinks\n'
+	printf '   (any structure other than "Plain" works; e.g. Post name)\n\n'
+	printf '3. Enable RTC: WP Admin > Settings > Writing > "Enable early access to\n'
 	printf '   real-time collaboration"\n\n'
-	printf '3. Note a post ID for an existing editor-role user you want to test with.\n\n'
-	printf '4. Copy .env.example to .env and fill in the required values:\n\n'
+	printf '4. Note a post ID for an existing editor-role user you want to test with.\n\n'
+	printf '5. Copy .env.example to .env and fill in the required values:\n\n'
 	printf '     cp .env.example .env\n\n'
 	printf '   Required values:\n'
 	printf '     WP_URL="%s"\n'      "${WP_URL}"
@@ -954,7 +968,7 @@ setup_manual() {
 	printf '     WP_PASS="<password>"\n'
 	printf '     WP_PATH="<absolute path to WordPress root>"\n'
 	printf '     POST_ID=<post_id>\n\n'
-	printf '5. Then run:\n'
+	printf '6. Then run:\n'
 	printf '     bash rtc-test.sh refresh-auth   # logs in and writes cookie jar + nonce\n\n'
 	printf 'After that, all test commands are available.\n'
 }
