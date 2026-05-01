@@ -823,10 +823,10 @@ setup_wpcli() {
 	local perm_struct
 	perm_struct="$(wp "${WP_FLAGS[@]}" option get permalink_structure 2>/dev/null)" || perm_struct=""
 	if [ -z "${perm_struct}" ]; then
-		printf 'Permalinks:     default (query-string) -- setting to /%postname%/\n'
+		printf 'Permalinks:     default (query-string) -- setting to /%%postname%%/\n'
 		wp "${WP_FLAGS[@]}" rewrite structure '/%postname%/' --hard >/dev/null 2>&1 \
 			|| die "Could not set permalink structure. Set it manually: Settings > Permalinks."
-		printf 'Permalinks:     set to /%postname%/\n'
+		printf 'Permalinks:     set to /%%postname%%/\n'
 	else
 		printf 'Permalinks:     %s\n' "${perm_struct}"
 	fi
