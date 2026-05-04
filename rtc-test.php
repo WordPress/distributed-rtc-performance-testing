@@ -879,65 +879,65 @@ function rtctest_rest_report_all( WP_REST_Request $request ) {
 }
 
 function rtctest_detect_object_cache_type() {
-    global $wp_object_cache;
+	global $wp_object_cache;
 
-    // WP's built-in non-persistent in-memory cache.
-    if ( ! wp_using_ext_object_cache() ) {
-        return 'default';
-    }
+	// WP's built-in non-persistent in-memory cache.
+	if ( ! wp_using_ext_object_cache() ) {
+		return 'default';
+	}
 
-    if ( ! isset( $wp_object_cache ) || ! is_object( $wp_object_cache ) ) {
-        return 'ext:unknown';
-    }
+	if ( ! isset( $wp_object_cache ) || ! is_object( $wp_object_cache ) ) {
+		return 'ext:unknown';
+	}
 
-    // Redis Object Cache (rhubarbgroup/redis-cache by Till Krüss).
-    // The drop-in exposes redis_status() whether or not the plugin is active.
-    if ( method_exists( $wp_object_cache, 'redis_status' ) ) {
-        return $wp_object_cache->redis_status() ? 'redis' : 'redis-disconnected';
-    }
+	// Redis Object Cache (rhubarbgroup/redis-cache by Till Krüss).
+	// The drop-in exposes redis_status() whether or not the plugin is active.
+	if ( method_exists( $wp_object_cache, 'redis_status' ) ) {
+		return $wp_object_cache->redis_status() ? 'redis' : 'redis-disconnected';
+	}
 
-    // Object Cache Pro (commercial Redis drop-in).
-    if ( strpos( get_class( $wp_object_cache ), 'RedisCachePro' ) === 0 ) {
-        return 'redis';
-    }
+	// Object Cache Pro (commercial Redis drop-in).
+	if ( strpos( get_class( $wp_object_cache ), 'RedisCachePro' ) === 0 ) {
+		return 'redis';
+	}
 
-    // WP Redis (Pantheon / Human Made / 10up). Different drop-in, same backend.
-    // Uses a $redis property but no redis_status() method.
-    if ( defined( 'WP_REDIS_OBJECT_CACHE' )
-        || ( property_exists( $wp_object_cache, 'redis' ) && isset( $wp_object_cache->redis ) ) ) {
-        return 'redis';
-    }
+	// WP Redis (Pantheon / Human Made / 10up). Different drop-in, same backend.
+	// Uses a $redis property but no redis_status() method.
+	if ( defined( 'WP_REDIS_OBJECT_CACHE' )
+		|| ( property_exists( $wp_object_cache, 'redis' ) && isset( $wp_object_cache->redis ) ) ) {
+		return 'redis';
+	}
 
-    // Memcached drop-in (Automattic / WordPress.com style).
-    // Exposes a public $mc property holding the actual client instance.
-    if ( property_exists( $wp_object_cache, 'mc' ) && isset( $wp_object_cache->mc ) ) {
-        if ( $wp_object_cache->mc instanceof \Memcached ) {
-            return 'memcached';
-        }
-        if ( $wp_object_cache->mc instanceof \Memcache ) {
-            return 'memcache';
-        }
-    }
+	// Memcached drop-in (Automattic / WordPress.com style).
+	// Exposes a public $mc property holding the actual client instance.
+	if ( property_exists( $wp_object_cache, 'mc' ) && isset( $wp_object_cache->mc ) ) {
+		if ( $wp_object_cache->mc instanceof \Memcached ) {
+			return 'memcached';
+		}
+		if ( $wp_object_cache->mc instanceof \Memcache ) {
+			return 'memcache';
+		}
+	}
 
-    // LiteSpeed Cache.
-    if ( strpos( get_class( $wp_object_cache ), 'LiteSpeed' ) !== false ) {
-        return 'litespeed';
-    }
+	// LiteSpeed Cache.
+	if ( strpos( get_class( $wp_object_cache ), 'LiteSpeed' ) !== false ) {
+		return 'litespeed';
+	}
 
-    // W3 Total Cache.
-    if ( method_exists( $wp_object_cache, '_get_engine' )
-        || strpos( get_class( $wp_object_cache ), 'W3TC' ) !== false ) {
-        return 'w3-total-cache';
-    }
+	// W3 Total Cache.
+	if ( method_exists( $wp_object_cache, '_get_engine' )
+		|| strpos( get_class( $wp_object_cache ), 'W3TC' ) !== false ) {
+		return 'w3-total-cache';
+	}
 
-    // APCu drop-in.
-    if ( method_exists( $wp_object_cache, 'apcu_fetch' )
-        || strpos( get_class( $wp_object_cache ), 'APCu' ) !== false ) {
-        return 'apcu';
-    }
+	// APCu drop-in.
+	if ( method_exists( $wp_object_cache, 'apcu_fetch' )
+		|| strpos( get_class( $wp_object_cache ), 'APCu' ) !== false ) {
+		return 'apcu';
+	}
 
-    // Fall back to the actual class name — captures everything else.
-    return 'ext:' . get_class( $wp_object_cache );
+	// Fall back to the actual class name — captures everything else.
+	return 'ext:' . get_class( $wp_object_cache );
 }
 
 function rtctest_get_env() {
