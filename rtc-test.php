@@ -1026,24 +1026,9 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 		}
 	}
 
-	$response = wp_remote_post(
-		rtrim( $reporter_url, '/' ) . '/wp-json/wp-unit-test-api/v1/rtc-performance-results',
-		array(
-			'headers' => array(
-				'Content-Type'  => 'application/json',
-				'Authorization' => 'Basic ' . base64_encode( $api_key ),
-			),
-			'body'    => wp_json_encode( array(
-				'environment_name' => $environment_name,
-				'env'              => $env,
-				'results'          => $results,
-			) ),
-			'timeout' => 30,
-		)
-	);
-
 	$submission_time = gmdate( 'Ymd\THis\Z' );
-	$report_log      = implode(
+	$log_path        = path_join( dirname( __FILE__ ), 'report-submission-' . $submission_time . '.log' );
+	$report_log_head = implode(
 		"\n",
 		array(
 			'RTC performance report — submission log',
@@ -1063,11 +1048,27 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 			'',
 			'------Response-------',
 			'',
-			print_r( $response, true ),
-			'',
 		)
 	);
-	file_put_contents( path_join( dirname( __FILE__ ), 'report-submission-' . $submission_time . '.log' ), $report_log );
+	file_put_contents( $log_path, $report_log_head, LOCK_EX );
+
+	$response = wp_remote_post(
+		rtrim( $reporter_url, '/' ) . '/wp-json/wp-unit-test-api/v1/rtc-performance-results',
+		array(
+			'headers' => array(
+				'Content-Type'  => 'application/json',
+				'Authorization' => 'Basic ' . base64_encode( $api_key ),
+			),
+			'body'    => wp_json_encode( array(
+				'environment_name' => $environment_name,
+				'env'              => $env,
+				'results'          => $results,
+			) ),
+			'timeout' => 30,
+		)
+	);
+
+	file_put_contents( $log_path, print_r( $response, true ) . "\n", FILE_APPEND | LOCK_EX );
 
 	if ( is_wp_error( $response ) ) {
 		return new WP_Error( 'submit_failed', $response->get_error_message(), array( 'status' => 502 ) );
