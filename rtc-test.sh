@@ -819,7 +819,8 @@ setup_wpcli() {
 		printf '    cp "%s/rtc-test.php" "%s/"\n' "${SCRIPT_DIR}" "${mu_plugins_dir}"
 	fi
 
-	# Ensure pretty permalinks are enabled — the REST API requires them.
+	# Ensure pretty permalinks are enabled because these tests use /wp-json/ endpoints
+	# and therefore require /wp-json/ routing to be available.
 	local perm_struct
 	perm_struct="$(wp "${WP_FLAGS[@]}" option get permalink_structure 2>/dev/null)" || perm_struct=""
 	if [ -z "${perm_struct}" ]; then
