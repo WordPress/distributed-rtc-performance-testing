@@ -881,34 +881,63 @@ function rtctest_rest_report_all( WP_REST_Request $request ) {
 function rtctest_detect_object_cache_type() {
 	global $wp_object_cache;
 
+	// WP's built-in non-persistent in-memory cache.
 	if ( ! wp_using_ext_object_cache() ) {
-		return 'default'; // WP's built-in non-persistent in-memory cache.
+		return 'default';
 	}
 
-	// Popular Redis drop-ins set one of these constants.
-	if ( defined( 'WP_REDIS_VERSION' ) ) {
-		return 'redis'; // Redis Object Cache plugin (Till Krüss).
-	}
-	if ( defined( 'WP_REDIS_OBJECT_CACHE' ) ) {
-		return 'redis'; // WP Redis (Pantheon / Human Made).
+	if ( ! isset( $wp_object_cache ) || ! is_object( $wp_object_cache ) ) {
+		return 'ext:unknown';
 	}
 
-	// Memcached drop-in (bundled with WordPress.com / Automattic).
-	if ( defined( 'WP_CACHE_KEY_SALT' ) && class_exists( 'Memcached' ) ) {
-		return 'memcached';
+	// Redis Object Cache (rhubarbgroup/redis-cache by Till Krüss).
+	// The drop-in exposes redis_status() whether or not the plugin is active.
+	if ( method_exists( $wp_object_cache, 'redis_status' ) ) {
+		return $wp_object_cache->redis_status() ? 'redis' : 'redis-disconnected';
 	}
-	if ( class_exists( 'Memcache' ) ) {
-		return 'memcache';
+
+	// Object Cache Pro (commercial Redis drop-in).
+	if ( str_contains( strtolower( get_class( $wp_object_cache ) ), 'redis' ) ) {
+		return 'redis';
+	}
+
+	// WP Redis (Pantheon / Human Made / 10up). Different drop-in, same backend.
+	// Uses a $redis property but no redis_status() method.
+	if ( defined( 'WP_REDIS_OBJECT_CACHE' )
+		|| ( property_exists( $wp_object_cache, 'redis' ) && isset( $wp_object_cache->redis ) ) ) {
+		return 'redis';
+	}
+
+	// Memcached drop-in (Automattic / WordPress.com style).
+	// Exposes a public $mc property holding the actual client instance.
+	if ( property_exists( $wp_object_cache, 'mc' ) && isset( $wp_object_cache->mc ) ) {
+		if ( $wp_object_cache->mc instanceof \Memcached ) {
+			return 'memcached';
+		}
+		if ( $wp_object_cache->mc instanceof \Memcache ) {
+			return 'memcache';
+		}
+	}
+
+	// LiteSpeed Cache.
+	if ( strpos( get_class( $wp_object_cache ), 'LiteSpeed' ) !== false ) {
+		return 'litespeed';
+	}
+
+	// W3 Total Cache.
+	if ( method_exists( $wp_object_cache, '_get_engine' )
+		|| strpos( get_class( $wp_object_cache ), 'W3TC' ) !== false ) {
+		return 'w3-total-cache';
+	}
+
+	// APCu drop-in.
+	if ( method_exists( $wp_object_cache, 'apcu_fetch' )
+		|| strpos( get_class( $wp_object_cache ), 'APCu' ) !== false ) {
+		return 'apcu';
 	}
 
 	// Fall back to the actual class name — captures everything else.
-	// Note: some drop-ins reuse the class name WP_Object_Cache even for
-	// Redis/Memcached backends, which is why the constant checks come first.
-	if ( isset( $wp_object_cache ) && is_object( $wp_object_cache ) ) {
-		return 'ext:' . get_class( $wp_object_cache );
-	}
-
-	return 'ext:unknown';
+	return 'ext:' . get_class( $wp_object_cache );
 }
 
 function rtctest_get_env() {
