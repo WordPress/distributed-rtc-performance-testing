@@ -897,7 +897,7 @@ function rtctest_detect_object_cache_type() {
 	}
 
 	// Object Cache Pro (commercial Redis drop-in).
-	if ( strpos( get_class( $wp_object_cache ), 'RedisCachePro' ) === 0 ) {
+	if ( str_contains( strtolower( get_class( $wp_object_cache ) ), 'redis' ) ) {
 		return 'redis';
 	}
 
