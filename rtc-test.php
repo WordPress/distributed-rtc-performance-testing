@@ -503,13 +503,18 @@ function rtctest_register_routes() {
 			'callback'            => 'rtctest_rest_report_all',
 			'permission_callback' => $cap_check,
 			'args'                => array(
-				'poll_delay'  => array(
+				'poll_delay'   => array(
 					'required' => false,
 					'type'     => 'integer',
 				),
-				'update_size' => array(
+				'update_size'  => array(
 					'required' => false,
 					'type'     => 'string',
+				),
+				'save_results' => array(
+					'required' => false,
+					'type'     => 'boolean',
+					'default'  => false,
 				),
 			),
 		)
@@ -875,7 +880,15 @@ function rtctest_rest_report_all( WP_REST_Request $request ) {
 		}
 	}
 
-	return rest_ensure_response( array( 'text' => ltrim( $out ) ) );
+	$report_text = ltrim( $out );
+
+	if ( $request->get_param( 'save_results' ) ) {
+		$timestamp = gmdate( 'Ymd\THis\Z' );
+		$path      = ABSPATH . 'test-results-' . $timestamp . '.log';
+		file_put_contents( $path, $report_text, LOCK_EX );
+	}
+
+	return rest_ensure_response( array( 'text' => $report_text ) );
 }
 
 function rtctest_detect_object_cache_type() {
@@ -1026,32 +1039,6 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 		}
 	}
 
-	$submission_time = gmdate( 'Ymd\THis\Z' );
-	$log_path        = path_join( dirname( __FILE__ ), 'report-submission-' . $submission_time . '.log' );
-	$report_log_head = implode(
-		"\n",
-		array(
-			'RTC performance report — submission log',
-			'Submitted at (UTC): ' . $submission_time,
-			'',
-			'------Environment Name-------',
-			'',
-			$environment_name,
-			'',
-			'------Env-------',
-			'',
-			print_r( $env, true ),
-			'',
-			'------Results-------',
-			'',
-			print_r( $results, true ),
-			'',
-			'------Response-------',
-			'',
-		)
-	);
-	file_put_contents( $log_path, $report_log_head, LOCK_EX );
-
 	$response = wp_remote_post(
 		rtrim( $reporter_url, '/' ) . '/wp-json/wp-unit-test-api/v1/rtc-performance-results',
 		array(
@@ -1068,7 +1055,9 @@ function rtctest_rest_submit( WP_REST_Request $request ) {
 		)
 	);
 
-	file_put_contents( $log_path, print_r( $response, true ) . "\n", FILE_APPEND | LOCK_EX );
+	$submission_time = gmdate( 'Ymd\THis\Z' );
+	$log_path        = ABSPATH . 'submit-response-' . $submission_time . '.log';
+	file_put_contents( $log_path, print_r( $response, true ), LOCK_EX );
 
 	if ( is_wp_error( $response ) ) {
 		return new WP_Error( 'submit_failed', $response->get_error_message(), array( 'status' => 502 ) );

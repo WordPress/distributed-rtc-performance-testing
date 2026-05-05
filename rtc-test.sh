@@ -1732,8 +1732,20 @@ cmd_report() {
 cmd_report_all() {
 	print_header "report-all"
 	require_auth
+	local url="${PLUGIN_REPORT_ALL_URL}"
+	local arg
+	for arg in "$@"; do
+		case "${arg}" in
+			--save-results)
+				case "${url}" in
+					*\?*) url="${url}&save_results=1" ;;
+					*)    url="${url}?save_results=1" ;;
+				esac
+				;;
+		esac
+	done
 	local data
-	data=$(curl "${BASE_CURL_OPTS[@]}" "${PLUGIN_REPORT_ALL_URL}" 2>/dev/null) || true
+	data=$(curl "${BASE_CURL_OPTS[@]}" "${url}" 2>/dev/null) || true
 	_print_report_text "${data}"
 }
 
@@ -2080,7 +2092,7 @@ case "${COMMAND}" in
 	sustain)                cmd_sustain ;;
 	env)                    cmd_env ;;
 	report)                 cmd_report ;;
-	report-all)             cmd_report_all ;;
+	report-all)             shift; cmd_report_all "$@" ;;
 	submit-results)         cmd_submit_results ;;
 	clear)                  cmd_clear ;;
 	reset)                  cmd_reset ;;
@@ -2113,7 +2125,7 @@ case "${COMMAND}" in
 		printf '  sustain               N_CLIENTS independent pollers for DURATION seconds\n'
 		printf '  env                   Print environment snapshot (PHP, WP, DB, cache, etc.)\n'
 		printf '  report                Fetch log from plugin and print summary table\n'
-		printf '  report-all            Print summary by approach × scenario × poll_delay × update_size\n'
+		printf '  report-all [--save-results]  Print summary by approach × scenario × poll_delay × update_size (--save-results writes test-results-TIMESTAMP.log to ABSPATH)\n'
 		printf '  submit-results        POST all results to the reporter endpoint (requires REPORTER_* vars)\n'
 		printf '  clear                 Delete all log entries (table stays, schema intact)\n'
 		printf '  reset                 Drop the log table entirely (recreated on next tagged request)\n'
