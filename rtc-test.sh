@@ -819,6 +819,46 @@ setup_wpcli() {
 		printf '    cp "%s/rtc-test.php" "%s/"\n' "${SCRIPT_DIR}" "${mu_plugins_dir}"
 	fi
 
+	# Ensure pretty permalinks are enabled because these tests use /wp-json/ endpoints
+	# and therefore require /wp-json/ routing to be available.
+	local perm_struct site_url rest_url
+	perm_struct="$(wp "${WP_FLAGS[@]}" option get permalink_structure 2>/dev/null)" || perm_struct=""
+	if [ -z "${perm_struct}" ]; then
+		local site_url rest_probe_url rest_probe_code
+		printf 'Permalinks:     default (query-string) -- setting to /%%postname%%/\n'
+ 		if wp "${WP_FLAGS[@]}" rewrite structure '/%postname%/' --hard >/dev/null 2>&1; then
+ 			:
+ 		else
+ 			printf 'Permalinks:     hard rewrite failed; retrying without --hard\n'
+ 			wp "${WP_FLAGS[@]}" rewrite structure '/%postname%/' >/dev/null 2>&1 \
+ 				|| die "Could not set permalink structure. Set it manually: Settings > Permalinks."
+ 			wp "${WP_FLAGS[@]}" rewrite flush >/dev/null 2>&1 \
+ 				|| die "Could not flush rewrite rules after setting permalink structure."
+ 		fi
+ 		site_url="$(wp "${WP_FLAGS[@]}" option get siteurl 2>/dev/null)" || site_url=""
+ 		rest_url="${site_url%/}/wp-json/"
+ 		if [ -n "${site_url}" ] && curl -fsS -o /dev/null "${rest_url}" >/dev/null 2>&1; then
+ 			printf 'Permalinks:     set to /%%postname%%/\n'
+			# Re-check the REST API after changing permalinks. Updating the option
+			# alone is not enough if server rewrite rules are still misconfigured.
+			site_url="$(wp "${WP_FLAGS[@]}" option get siteurl 2>/dev/null)" || site_url=""
+			rest_probe_url="${site_url%/}/wp-json/"
+			rest_probe_code="$(curl -sS -L -o /dev/null -w '%{http_code}' "${rest_probe_url}" 2>/dev/null)" || rest_probe_code=""
+			case "${rest_probe_code}" in
+				2*)
+					printf 'REST API:       %s (OK after permalink update)\n' "${rest_probe_url}"
+					;;
+				*)
+					die "Permalinks were updated, but ${rest_probe_url} is still unreachable (HTTP ${rest_probe_code:-request failed}). Check web server rewrite rules and try again."
+					;;
+			esac
+ 		else
+ 			die "Could not make REST API reachable after setting permalink structure. Check permalinks/web server config and verify ${rest_url:-/wp-json/}."
+ 		fi
+	else
+		printf 'Permalinks:     %s\n' "${perm_struct}"
+	fi
+
 	# Always use the dedicated rtctest user so setup controls the password.
 	# We generate the password here and either create or reset the account.
 	local rtctest_wp_pass
@@ -880,7 +920,8 @@ setup_wpcli() {
 	fi
 
 	# Check if SAVEQUERIES is already defined and enabled in wp-config.php.
-	savequeries_value=$(wp "${WP_FLAGS[@]}" config get SAVEQUERIES 2>/dev/null)
+	local savequeries_value
+	savequeries_value=$(wp "${WP_FLAGS[@]}" config get SAVEQUERIES 2>/dev/null || true)
 	if [ "$savequeries_value" = "true" ] || [ "$savequeries_value" = "1" ]; then
 		printf 'SAVEQUERIES:    already enabled in wp-config.php\n'
 	# Enable SAVEQUERIES so the plugin can record per-request DB time.
@@ -943,10 +984,12 @@ setup_manual() {
 	printf 'WP-CLI not available. Manual setup steps:\n\n'
 	printf '1. Copy rtc-test.php to the site'"'"'s mu-plugins directory:\n'
 	printf '   cp rtc-test.php /path/to/wp-content/mu-plugins/\n\n'
-	printf '2. Enable RTC: WP Admin > Settings > Writing > "Enable early access to\n'
+	printf '2. Enable pretty permalinks: WP Admin > Settings > Permalinks\n'
+	printf '   (any structure other than "Plain" works; e.g. Post name)\n\n'
+	printf '3. Enable RTC: WP Admin > Settings > Writing > "Enable early access to\n'
 	printf '   real-time collaboration"\n\n'
-	printf '3. Note a post ID for an existing editor-role user you want to test with.\n\n'
-	printf '4. Copy .env.example to .env and fill in the required values:\n\n'
+	printf '4. Note a post ID for an existing editor-role user you want to test with.\n\n'
+	printf '5. Copy .env.example to .env and fill in the required values:\n\n'
 	printf '     cp .env.example .env\n\n'
 	printf '   Required values:\n'
 	printf '     WP_URL="%s"\n'      "${WP_URL}"
@@ -954,7 +997,7 @@ setup_manual() {
 	printf '     WP_PASS="<password>"\n'
 	printf '     WP_PATH="<absolute path to WordPress root>"\n'
 	printf '     POST_ID=<post_id>\n\n'
-	printf '5. Then run:\n'
+	printf '6. Then run:\n'
 	printf '     bash rtc-test.sh refresh-auth   # logs in and writes cookie jar + nonce\n\n'
 	printf 'After that, all test commands are available.\n'
 }
