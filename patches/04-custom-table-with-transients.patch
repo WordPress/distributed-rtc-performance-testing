@@ -193,10 +193,10 @@ index 11698a2ac78f4..6b26d60ac8dab 100644
 +}
 diff --git a/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
 new file mode 100644
-index 0000000000000..da4ec17945f1b
+index 0000000000000..624e9ce49ea5e
 --- /dev/null
 +++ b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
-@@ -0,0 +1,446 @@
+@@ -0,0 +1,447 @@
 +<?php
 +/**
 + * WP_Collaboration_Table_Storage class
@@ -222,7 +222,7 @@ index 0000000000000..da4ec17945f1b
 + *
 + * @access private
 + *
-+ * @phpstan-type AwarenessState array{client_id: string, state: array<string, mixed>, user_id: int, timestamp: int}
++ * @phpstan-type AwarenessState array{client_id: string, state: array<mixed, mixed>, user_id: int, timestamp: int}
 + */
 +class WP_Collaboration_Table_Storage {
 +	/**
@@ -424,7 +424,7 @@ index 0000000000000..da4ec17945f1b
 +		 */
 +
 +		// Snapshot the current max ID and total row count in a single query.
-+		/** @var object{ max_id: int, total: int } $snapshot */
++		/** @var object{ max_id: string, total: string } $snapshot */
 +		$snapshot = $wpdb->get_row(
 +			$wpdb->prepare(
 +				"SELECT COALESCE( MAX( collaboration_id ), 0 ) AS max_id, COUNT(*) AS total FROM {$wpdb->collaboration} WHERE room = %s AND type != 'awareness'",
@@ -597,6 +597,7 @@ index 0000000000000..da4ec17945f1b
 +		 *
 +		 * In the event of a race condition, the latest row will be returned as the update target.
 +		 */
++		/** @var object{ collaboration_id: string, date_gmt: string, data: string }|null $exists */
 +		$exists = $wpdb->get_row(
 +			$wpdb->prepare(
 +				"SELECT collaboration_id, date_gmt, data FROM {$wpdb->collaboration} WHERE room = %s AND type = 'awareness' AND client_id = %s  ORDER BY collaboration_id DESC LIMIT 1",
@@ -647,7 +648,7 @@ diff --git a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
 similarity index 54%
 rename from src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
 rename to src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
-index a90821ab78d3e..ca0443ed03b77 100644
+index 5e369d9f77f0f..3f52010b71c21 100644
 --- a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
 +++ b/src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
 @@ -1,8 +1,9 @@
@@ -1176,7 +1177,7 @@ index a90821ab78d3e..ca0443ed03b77 100644
  				 *
  				 * Check for a newer compaction update first. If one exists, skip this
  				 * compaction to avoid overwriting it.
-@@ -487,19 +499,39 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -487,15 +499,33 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
  				}
  
  				if ( ! $has_newer_compaction ) {
@@ -1213,16 +1214,8 @@ index a90821ab78d3e..ca0443ed03b77 100644
 +					return true;
  				}
  
--				// Reaching this point means there's a newer compaction, so we can
--				// silently ignore this one.
-+				/*
-+				 * Reaching this point means there's a newer compaction,
-+				 * so we can silently ignore this one.
-+				 */
- 				return true;
- 
- 			case self::UPDATE_TYPE_SYNC_STEP1:
-@@ -519,7 +551,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+ 				/*
+@@ -524,7 +554,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
  
  		return new WP_Error(
  			'rest_invalid_update_type',
@@ -1231,7 +1224,7 @@ index a90821ab78d3e..ca0443ed03b77 100644
  			array( 'status' => 400 )
  		);
  	}
-@@ -530,12 +562,12 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -535,12 +565,12 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
  	 * @since 7.0.0
  	 *
  	 * @param string $room      Room identifier.
@@ -1246,7 +1239,7 @@ index a90821ab78d3e..ca0443ed03b77 100644
  		$update = array(
  			'client_id' => $client_id,
  			'data'      => $data,
-@@ -543,10 +575,15 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -548,10 +578,15 @@ private function add_update( string $room, int $client_id, string $type, string
  		);
  
  		if ( ! $this->storage->add_update( $room, $update ) ) {
@@ -1265,7 +1258,7 @@ index a90821ab78d3e..ca0443ed03b77 100644
  			);
  		}
  
-@@ -554,7 +591,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -559,7 +594,7 @@ private function add_update( string $room, int $client_id, string $type, string
  	}
  
  	/**
@@ -1274,7 +1267,7 @@ index a90821ab78d3e..ca0443ed03b77 100644
  	 *
  	 * Delegates cursor-based retrieval to the storage layer, then applies
  	 * client-specific filtering and compaction logic.
-@@ -562,7 +599,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -567,7 +602,7 @@ private function add_update( string $room, int $client_id, string $type, string
  	 * @since 7.0.0
  	 *
  	 * @param string $room         Room identifier.
@@ -1283,15 +1276,30 @@ index a90821ab78d3e..ca0443ed03b77 100644
  	 * @param int    $cursor       Return updates after this cursor.
  	 * @param bool   $is_compactor True if this client is nominated to perform compaction.
  	 * @return array{
-@@ -573,7 +610,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -578,8 +613,21 @@ private function add_update( string $room, int $client_id, string $type, string
  	 *   updates: array<int, array{data: string, type: string}>,
  	 * } Response data for this room.
  	 */
 -	private function get_updates( string $room, int $client_id, int $cursor, bool $is_compactor ): array {
+-		$updates_after_cursor = $this->storage->get_updates_after_cursor( $room, $cursor );
 +	private function get_updates( string $room, string $client_id, int $cursor, bool $is_compactor ): array {
- 		$updates_after_cursor = $this->storage->get_updates_after_cursor( $room, $cursor );
++		$updates_after_cursor = array_filter(
++			$this->storage->get_updates_after_cursor( $room, $cursor ),
++			static function ( $update ): bool {
++				return (
++					is_array( $update )
++					&&
++					isset( $update['client_id'], $update['type'], $update['data'] )
++					&&
++					is_string( $update['type'] )
++					&&
++					is_string( $update['data'] )
++				);
++			}
++		);
  		$total_updates        = $this->storage->get_update_count( $room );
  
+ 		// Filter out this client's updates, except compaction updates.
 diff --git a/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php b/src/wp-includes/collaboration/class-wp-sync-post-meta-storage.php
 deleted file mode 100644
 index 658a9b65539dd..0000000000000
