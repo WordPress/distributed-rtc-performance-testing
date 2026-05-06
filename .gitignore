@@ -2,3 +2,6 @@
 simulated-test-with-php-data-collection/rtc-test-cookies.txt
 simulated-test-with-php-data-collection/rtc-test.env
 /rtc-test-cookies.txt
+
+test-results-[0-9]*.log
+submit-response-[0-9]*.log

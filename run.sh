@@ -153,7 +153,7 @@ done
 bash "${RTC}" reset-approach
 
 # ── Results ───────────────────────────────────────────────────────────────────
-bash "${RTC}" report-all
+bash "${RTC}" report-all --save-results
 bash "${RTC}" submit-results
 
 printf '\nTotal wall time: %s\n' "$(_run_sh_format_elapsed "${SECONDS}")"
