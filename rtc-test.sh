@@ -920,6 +920,7 @@ setup_wpcli() {
 	fi
 
 	# Check if SAVEQUERIES is already defined and enabled in wp-config.php.
+	local savequeries_value
 	savequeries_value=$(wp "${WP_FLAGS[@]}" config get SAVEQUERIES 2>/dev/null || true)
 	if [ "$savequeries_value" = "true" ] || [ "$savequeries_value" = "1" ]; then
 		printf 'SAVEQUERIES:    already enabled in wp-config.php\n'
