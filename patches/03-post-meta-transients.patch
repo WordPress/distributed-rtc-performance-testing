@@ -24,10 +24,10 @@ index cf07b07d977c3..fa337981d31bc 100644
  
  		$rand = ( isset( $query_vars['orderby'] ) && 'rand' === $query_vars['orderby'] );
 diff --git a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-index 88554a48c7d54..c02dd9af67c30 100644
+index 5e369d9f77f0f..0562248e7e770 100644
 --- a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
 +++ b/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
-@@ -355,12 +355,33 @@ private function process_awareness_update( string $room, int $client_id, ?array
+@@ -429,12 +429,33 @@ private function process_awareness_update( string $room, int $client_id, ?array
  			$updated_awareness[] = $entry;
  		}
  
@@ -376,10 +376,10 @@ index c657c6c2e7af3..a32e19f0cf7ab 100644
  	if ( empty( $args['auth_callback'] ) ) {
  		if ( is_protected_meta( $meta_key, $object_type ) ) {
 diff --git a/src/wp-includes/post.php b/src/wp-includes/post.php
-index 215fa153f7495..9af3193e71055 100644
+index b225d35c48b2a..fd1efda1c1f65 100644
 --- a/src/wp-includes/post.php
 +++ b/src/wp-includes/post.php
-@@ -8445,6 +8445,51 @@ function wp_add_trashed_suffix_to_post_name_for_post( $post ) {
+@@ -8448,6 +8448,51 @@ function wp_add_trashed_suffix_to_post_name_for_post( $post ) {
   */
  function wp_cache_set_posts_last_changed() {
  	wp_cache_set_last_changed( 'posts' );
@@ -431,7 +431,7 @@ index 215fa153f7495..9af3193e71055 100644
  }
  
  /**
-@@ -8652,7 +8697,9 @@ function use_block_editor_for_post_type( $post_type ) {
+@@ -8655,7 +8700,9 @@ function use_block_editor_for_post_type( $post_type ) {
   * Registers any additional post meta fields.
   *
   * @since 6.3.0 Adds `wp_pattern_sync_status` meta field to the wp_block post type so an unsynced option can be added.
@@ -442,7 +442,7 @@ index 215fa153f7495..9af3193e71055 100644
   *
   * @link https://github.com/WordPress/gutenberg/pull/51144
   */
-@@ -8673,6 +8720,15 @@ function wp_create_initial_post_meta() {
+@@ -8676,6 +8723,15 @@ function wp_create_initial_post_meta() {
  		)
  	);
  
@@ -458,7 +458,7 @@ index 215fa153f7495..9af3193e71055 100644
  	if ( wp_is_collaboration_enabled() ) {
  		register_meta(
  			'post',
-@@ -8697,5 +8753,14 @@ function wp_create_initial_post_meta() {
+@@ -8700,5 +8756,14 @@ function wp_create_initial_post_meta() {
  				'type'              => 'string',
  			)
  		);

@@ -84,39 +84,46 @@ index e5300e6d75122..f22ac010cc975 100644
  	 * WordPress Terms table.
  	 *
 diff --git a/src/wp-includes/collaboration.php b/src/wp-includes/collaboration.php
-index 11698a2ac78f4..350b6cf1b21b0 100644
+index 11698a2ac78f4..f19db079e5174 100644
 --- a/src/wp-includes/collaboration.php
 +++ b/src/wp-includes/collaboration.php
-@@ -11,7 +11,8 @@
+@@ -11,7 +11,6 @@
   *
   * If the WP_ALLOW_COLLABORATION constant is false,
   * collaboration is always disabled regardless of the database option.
 - * Otherwise, falls back to the 'wp_collaboration_enabled' option.
-+ * Otherwise, the feature requires both the 'wp_collaboration_enabled'
-+ * option and the database schema introduced in db_version 61841.
   *
   * @since 7.0.0
   *
-@@ -20,7 +21,8 @@
+@@ -20,7 +19,7 @@
  function wp_is_collaboration_enabled() {
  	return (
  		wp_is_collaboration_allowed() &&
 -		(bool) get_option( 'wp_collaboration_enabled' )
-+		get_option( 'wp_collaboration_enabled' ) &&
-+		get_option( 'db_version' ) >= 61841
++		get_option( 'wp_collaboration_enabled' )
  	);
  }
  
-@@ -34,7 +36,7 @@ function wp_is_collaboration_enabled() {
+@@ -32,11 +31,17 @@ function wp_is_collaboration_enabled() {
+  * The constant defaults to true, unless the WP_ALLOW_COLLABORATION
+  * environment variable is set to string "false".
   *
++ * Also requires the database schema introduced in db_version 61841.
++ *
   * @since 7.0.0
   *
 - * @return bool Whether real-time collaboration is enabled.
 + * @return bool Whether real-time collaboration is allowed.
   */
  function wp_is_collaboration_allowed() {
++	if ( get_option( 'db_version' ) < 61841 ) {
++		return false;
++	}
++
  	if ( ! defined( 'WP_ALLOW_COLLABORATION' ) ) {
-@@ -83,3 +85,41 @@ function wp_collaboration_inject_setting() {
+ 		$env_value = getenv( 'WP_ALLOW_COLLABORATION' );
+ 		if ( false === $env_value ) {
+@@ -83,3 +88,41 @@ function wp_collaboration_inject_setting() {
  		'after'
  	);
  }
@@ -160,10 +167,10 @@ index 11698a2ac78f4..350b6cf1b21b0 100644
 +}
 diff --git a/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
 new file mode 100644
-index 0000000000000..de216c1aa35d8
+index 0000000000000..74bd8ac59ec1a
 --- /dev/null
 +++ b/src/wp-includes/collaboration/class-wp-collaboration-table-storage.php
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,382 @@
 +<?php
 +/**
 + * WP_Collaboration_Table_Storage class
@@ -472,12 +479,26 @@ index 0000000000000..de216c1aa35d8
 +
 +		$data = wp_json_encode( $state );
 +
-+		/*
-+		 * Bucket the timestamp to 5-second intervals so most polls
-+		 * short-circuit without a database write. Ceil is used instead
-+		 * of floor to prevent the awareness timeout from being hit early.
++		/**
++		 * Filters granularity used for rounding up a client's awareness timestamp.
++		 *
++		 * Modifies the granularity used when recording the latest time a client updates their
++		 * awareness state. This allows implementations to increase or reduce the granularity
++		 * of awareness updates for the desired balance of real-time updates and server load.
++		 *
++		 * The default awareness granularity of 10 seconds limits the number of writes to the
++		 * database/object cache as the awareness state is only updated if the time has changed.
++		 *
++		 * @since 7.0.0
++		 *
++		 * @param int $granularity Granularity in seconds. Default 10.
 +		 */
-+		$now = gmdate( 'Y-m-d H:i:s', (int) ceil( time() / 5 ) * 5 );
++		$granularity = absint( apply_filters( 'wp_sync_awareness_timestamp_granularity', 10 ) );
++		if ( 0 === $granularity ) {
++			$granularity = 1;
++		}
++
++		$now = gmdate( 'Y-m-d H:i:s', (int) ceil( time() / $granularity ) * $granularity );
 +
 +		/* Check if a row already exists. */
 +		$exists = $wpdb->get_row(
@@ -522,45 +543,21 @@ index 0000000000000..de216c1aa35d8
 +		}
 +
 +		/*
-+		 * Update the cached entries in-place so the next reader in this
-+		 * room gets a cache hit with fresh data. If the cache is cold,
-+		 * skip — the next get_awareness_state() call will prime it.
++		 * Delete the cache so the next get_awareness_state() call re-reads
++		 * from the database. This keeps the cache-building logic in a single
++		 * location rather than duplicating it on the write path.
 +		 */
 +		$cache_key = 'awareness:' . str_replace( '/', ':', $room );
-+		$cached    = wp_cache_get( $cache_key, 'collaboration' );
-+
-+		if ( false !== $cached ) {
-+			$normalized_state = json_decode( $data, true );
-+			$found            = false;
-+
-+			foreach ( $cached as $i => $entry ) {
-+				if ( $client_id === $entry['client_id'] ) {
-+					$cached[ $i ]['state']   = $normalized_state;
-+					$cached[ $i ]['user_id'] = $user_id;
-+					$found                   = true;
-+					break;
-+				}
-+			}
-+
-+			if ( ! $found ) {
-+				$cached[] = array(
-+					'client_id' => $client_id,
-+					'state'     => $normalized_state,
-+					'user_id'   => $user_id,
-+				);
-+			}
-+
-+			wp_cache_set( $cache_key, $cached, 'collaboration', 30 );
-+		}
++		wp_cache_delete( $cache_key, 'collaboration' );
 +
 +		return true;
 +	}
 +}
 diff --git a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php b/src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
-similarity index 54%
+similarity index 55%
 rename from src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
 rename to src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
-index a90821ab78d3e..b3a7907cb021c 100644
+index 5e369d9f77f0f..e08ae41eb5fc4 100644
 --- a/src/wp-includes/collaboration/class-wp-http-polling-sync-server.php
 +++ b/src/wp-includes/collaboration/class-wp-http-polling-collaboration-server.php
 @@ -1,8 +1,9 @@
@@ -1097,7 +1094,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  				 *
  				 * Check for a newer compaction update first. If one exists, skip this
  				 * compaction to avoid overwriting it.
-@@ -487,19 +502,39 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -487,20 +502,38 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
  				}
  
  				if ( ! $has_newer_compaction ) {
@@ -1134,16 +1131,14 @@ index a90821ab78d3e..b3a7907cb021c 100644
 +					return true;
  				}
  
--				// Reaching this point means there's a newer compaction, so we can
--				// silently ignore this one.
-+				/*
-+				 * Reaching this point means there's a newer compaction,
-+				 * so we can silently ignore this one.
-+				 */
- 				return true;
- 
- 			case self::UPDATE_TYPE_SYNC_STEP1:
-@@ -519,7 +554,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+ 				/*
+ 				 * A newer compaction already advanced the cursor, but we
+-				 * can not safely drop an update. The incoming bytes still encode
++				 * cannot safely drop an update. The incoming bytes still encode
+ 				 * operations other clients may not have seen, so store them as a
+ 				 * regular update. Y.applyUpdateV2 merges state-as-update blobs
+ 				 * idempotently, so overlap with the existing compaction is safe.
+@@ -524,7 +557,7 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
  
  		return new WP_Error(
  			'rest_invalid_update_type',
@@ -1152,7 +1147,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			array( 'status' => 400 )
  		);
  	}
-@@ -530,12 +565,12 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
+@@ -535,12 +568,12 @@ private function process_sync_update( string $room, int $client_id, int $cursor,
  	 * @since 7.0.0
  	 *
  	 * @param string $room      Room identifier.
@@ -1167,7 +1162,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  		$update = array(
  			'client_id' => $client_id,
  			'data'      => $data,
-@@ -543,10 +578,15 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -548,10 +581,15 @@ private function add_update( string $room, int $client_id, string $type, string
  		);
  
  		if ( ! $this->storage->add_update( $room, $update ) ) {
@@ -1186,7 +1181,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  			);
  		}
  
-@@ -554,7 +594,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -559,7 +597,7 @@ private function add_update( string $room, int $client_id, string $type, string
  	}
  
  	/**
@@ -1195,7 +1190,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 *
  	 * Delegates cursor-based retrieval to the storage layer, then applies
  	 * client-specific filtering and compaction logic.
-@@ -562,7 +602,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -567,7 +605,7 @@ private function add_update( string $room, int $client_id, string $type, string
  	 * @since 7.0.0
  	 *
  	 * @param string $room         Room identifier.
@@ -1204,7 +1199,7 @@ index a90821ab78d3e..b3a7907cb021c 100644
  	 * @param int    $cursor       Return updates after this cursor.
  	 * @param bool   $is_compactor True if this client is nominated to perform compaction.
  	 * @return array{
-@@ -573,7 +613,7 @@ private function add_update( string $room, int $client_id, string $type, string
+@@ -578,7 +616,7 @@ private function add_update( string $room, int $client_id, string $type, string
  	 *   updates: array<int, array{data: string, type: string}>,
  	 * } Response data for this room.
  	 */
